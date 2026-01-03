@@ -20,9 +20,11 @@ def minimize_window(app_name: str):
     pass
 
 
+import ctypes
 import pywinctl
 import pyvda
 import pyautogui
+import pyperclip
 import re
 import time
 from typing import Dict, List, Union, Optional
@@ -82,18 +84,51 @@ class WindowManager:
             return {"status": "error", "message": str(e)}
 
     def focus_window(self, app_name: str) -> Dict[str, str]:
-        """Brings a window to the front."""
+        """
+        Brings a window to the front using low-level OS calls.
+        Uses ctypes to bypass Windows Focus Stealing Prevention.
+        """
         target = self._find_window(app_name)
         if not target:
             return {"status": "error", "message": f"Window '{app_name}' not found."}
 
         try:
-            # Bypass Windows Focus Stealing Prevention by pressing Alt
-            pyautogui.press('alt')
-            target.activate()
+            hwnd = target.getHandle()
+            user32 = ctypes.windll.user32
+
+            # 1. Force Restore if Minimized (SW_RESTORE = 9)
+            if user32.IsIconic(hwnd):
+                user32.ShowWindow(hwnd, 9)
+
+            # 2. Get current foreground window's thread
+            foreground_hwnd = user32.GetForegroundWindow()
+            foreground_thread = user32.GetWindowThreadProcessId(foreground_hwnd, None)
+            target_thread = user32.GetWindowThreadProcessId(hwnd, None)
+
+            # 3. Attach to the foreground thread to gain focus rights
+            if foreground_thread != target_thread:
+                user32.AttachThreadInput(foreground_thread, target_thread, True)
+
+            # 4. Force window to foreground
+            user32.SetForegroundWindow(hwnd)
+            user32.BringWindowToTop(hwnd)
+
+            # 5. Flash briefly to ensure visibility (non-intrusive)
+            user32.SetActiveWindow(hwnd)
+
+            # 6. Detach threads
+            if foreground_thread != target_thread:
+                user32.AttachThreadInput(foreground_thread, target_thread, False)
+
             return {"status": "success", "message": f"Focused: {target.title}"}
         except Exception as e:
-            return {"status": "error", "message": f"Could not focus window: {str(e)}"}
+            # Fallback to pyautogui method
+            try:
+                pyautogui.press('alt')
+                target.activate()
+                return {"status": "success", "message": f"Focused (fallback): {target.title}"}
+            except Exception as e2:
+                return {"status": "error", "message": f"Could not focus window: {str(e)} / {str(e2)}"}
 
     def minimize_window(self, app_name: str) -> Dict[str, str]:
         """Minimizes a window."""
@@ -124,12 +159,120 @@ class WindowManager:
         target = self._find_window(app_name)
         if not target:
             return {"status": "error", "message": f"Window '{app_name}' not found."}
-        
+
         try:
             target.close()
             return {"status": "success", "message": f"Closed: {target.title}"}
         except Exception as e:
             return {"status": "error", "message": str(e)}
+
+    # --- TEXT INPUT ---
+
+    def type_text(self, text: str, use_clipboard: bool = None) -> Dict[str, str]:
+        """
+        Types text into the currently focused window.
+        For long text (>50 chars), uses clipboard paste for speed.
+
+        Args:
+            text: The text to type
+            use_clipboard: Force clipboard paste (True) or typing (False).
+                          None = auto-decide based on length.
+        """
+        try:
+            # Auto-decide: paste if long text
+            if use_clipboard is None:
+                use_clipboard = len(text) > 50
+
+            if use_clipboard:
+                # Copy-Paste method (faster for long text)
+                pyperclip.copy(text)
+                pyautogui.hotkey('ctrl', 'v')
+                return {"status": "success", "message": f"Pasted text via clipboard ({len(text)} chars)"}
+            else:
+                # Type method (more reliable for short text)
+                pyautogui.write(text, interval=0.02)  # Small delay between keys
+                return {"status": "success", "message": f"Typed: {text[:50]}{'...' if len(text) > 50 else ''}"}
+        except Exception as e:
+            return {"status": "error", "message": f"Failed to type text: {str(e)}"}
+
+    # --- BATCH OPERATIONS ---
+
+    def minimize_all(self, filter_name: str = None) -> Dict[str, Union[str, int]]:
+        """
+        Smart batch tool: Minimizes all windows, optionally filtered by name.
+
+        Args:
+            filter_name: Optional - only minimize windows containing this text.
+                        If None, minimizes ALL windows.
+
+        Examples:
+            minimize_all() -> minimizes everything
+            minimize_all("chrome") -> minimizes all Chrome windows
+        """
+        try:
+            count = 0
+            skipped = 0
+            all_windows = pywinctl.getAllWindows()
+
+            for win in all_windows:
+                # Skip empty titles (system windows)
+                if not win.title:
+                    continue
+
+                # Skip helper/system windows
+                if any(skip in win.title.lower() for skip in self.SKIP_WINDOWS):
+                    continue
+
+                # Filter check
+                if filter_name:
+                    if filter_name.lower() not in win.title.lower():
+                        skipped += 1
+                        continue
+
+                try:
+                    win.minimize()
+                    count += 1
+                except Exception:
+                    skipped += 1  # Some windows can't be minimized
+
+            msg = f"Minimized {count} windows"
+            if filter_name:
+                msg += f" matching '{filter_name}'"
+            if skipped > 0:
+                msg += f" ({skipped} skipped)"
+
+            return {"status": "success", "message": msg, "count": count}
+        except Exception as e:
+            return {"status": "error", "message": f"minimize_all failed: {str(e)}"}
+
+    def maximize_all(self, filter_name: str = None) -> Dict[str, Union[str, int]]:
+        """
+        Smart batch tool: Maximizes all windows, optionally filtered by name.
+        """
+        try:
+            count = 0
+            all_windows = pywinctl.getAllWindows()
+
+            for win in all_windows:
+                if not win.title:
+                    continue
+                if any(skip in win.title.lower() for skip in self.SKIP_WINDOWS):
+                    continue
+                if filter_name and filter_name.lower() not in win.title.lower():
+                    continue
+
+                try:
+                    win.maximize()
+                    count += 1
+                except Exception:
+                    pass
+
+            msg = f"Maximized {count} windows"
+            if filter_name:
+                msg += f" matching '{filter_name}'"
+            return {"status": "success", "message": msg, "count": count}
+        except Exception as e:
+            return {"status": "error", "message": f"maximize_all failed: {str(e)}"}
 
     # --- DESKTOP COMMANDS (Virtual Desktops) ---
 

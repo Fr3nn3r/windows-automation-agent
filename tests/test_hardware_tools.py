@@ -89,6 +89,7 @@ class TestHardwareController:
         assert isinstance(result, dict)
         assert 'status' in result
 
+    @pytest.mark.skip(reason="Actually turns off the screen - run manually if needed")
     def test_turn_screen_off_returns_dict(self, controller):
         """Test turn_screen_off returns a dictionary."""
         # Note: This actually sends the signal, so we just check return format

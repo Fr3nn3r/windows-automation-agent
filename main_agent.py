@@ -168,10 +168,15 @@ class ToolRegistry:
             "list_windows": self.windows.list_open_windows,
             "focus_window": self.windows.focus_window,
             "minimize_window": self.windows.minimize_window,
+            "minimize_all": self.windows.minimize_all,  # Smart batch minimize
+            "maximize_all": self.windows.maximize_all,  # Smart batch maximize
             "close_window": self.windows.close_window,
             "list_desktops": self.windows.list_desktops,
             "switch_desktop": self.windows.switch_desktop,
             "move_window": self.windows.move_window_to_desktop,
+
+            # --- Text Input ---
+            "type_text": self.windows.type_text,  # Type or paste text
 
             # --- System ---
             "list_files": self.system.list_directory,
@@ -179,7 +184,7 @@ class ToolRegistry:
             "check_processes": self.system.list_processes,
             "delete_item": self.system.delete_item,
 
-            # --- New Tools ---
+            # --- App Launcher & Clipboard ---
             "launch_app": self.system.launch_app,
             "open_explorer": self.system.open_explorer,
             "get_clipboard": self.system.get_clipboard,
@@ -224,6 +229,7 @@ Tools and their EXACT argument names:
 - list_windows: args: {}
 - focus_window: args: {"app_name": "<window name>"}
 - minimize_window: args: {"app_name": "<window name>"}
+- minimize_all: args: {"filter_name": "<optional>"} - Smart batch: minimizes ALL windows (or filtered)
 - close_window: args: {"app_name": "<window name>"} [DESTRUCTIVE - requires confirmation]
 - list_desktops: args: {} - returns current desktop index and total count
 - switch_desktop: args: {"index": <int>} - desktop indexes start at 1
@@ -236,11 +242,13 @@ Tools and their EXACT argument names:
 - open_explorer: args: {"path": "<folder path>"}
 - get_clipboard: args: {}
 - set_clipboard: args: {"text": "<text to copy>"}
+- type_text: args: {"text": "<text to type>"} - Types/pastes text into focused window
 
 IMPORTANT:
 - When user says "current desktop", first call list_desktops to get the current_index.
 - All argument values must be the correct type: integers for index/level, strings for names/paths.
 - For paths, you can use ~ to refer to the user's home directory.
+- For "minimize all X windows", use minimize_all with filter_name, NOT multiple minimize_window calls.
 """
 
         context_info = f"""
@@ -264,9 +272,16 @@ Please try a different approach or correct the error.
             f"{tools_spec}\n"
             f"{context_info}\n"
             f"{error_context}"
-            "Output ONLY a single JSON object (not an array): {\"tool\": \"tool_name\", \"args\": {\"arg_name\": \"value\"}}\n"
-            "Execute ONE action at a time. For multi-step tasks, do the first step only.\n"
-            "If impossible, output: {\"tool\": \"error\", \"args\": {\"message\": \"reason\"}}"
+            "OUTPUT FORMAT:\n"
+            "Return a SINGLE JSON object OR a LIST for multi-step tasks.\n"
+            "Single: {\"tool\": \"tool_name\", \"args\": {...}}\n"
+            "Multi:  [{\"tool\": \"launch_app\", \"args\": {...}}, {\"tool\": \"type_text\", \"args\": {...}}]\n\n"
+            "CRITICAL RULES:\n"
+            "1. If user asks to 'Open X and type Y', return a LIST with launch_app THEN type_text.\n"
+            "2. Actions in history starting with 'Executed:' are ALREADY DONE. Do NOT repeat them.\n"
+            "3. Only output NEW actions needed for the current request.\n"
+            "4. If user says 'do the same' or 'again', repeat only the relevant actions, not the entire history.\n"
+            "5. If impossible, output: {\"tool\": \"error\", \"args\": {\"message\": \"reason\"}}"
         )
 
     def decide(self, context: AgentContext, user_input: str) -> Dict[str, Any]:
@@ -314,7 +329,25 @@ Please try a different approach or correct the error.
             level = int(nums[0]) if nums else 50
             return {"tool": "set_brightness", "args": {"level": level}}
 
-        # Launch app commands
+        # Multi-step commands: "Open X and type Y" or "Open X and paste Y"
+        if ("open" in user_lower or "launch" in user_lower) and ("type" in user_lower or "paste" in user_lower):
+            app = "notepad"  # Default
+            for a in ["notepad", "chrome", "code"]:
+                if a in user_lower:
+                    app = a
+                    break
+
+            # Extract text to type (in quotes or after 'type'/'paste')
+            match = re.search(r"['\"]([^'\"]+)['\"]", user_input)
+            text = match.group(1) if match else "Hello World"
+
+            # Return LIST of actions
+            return [
+                {"tool": "launch_app", "args": {"app_name": app}},
+                {"tool": "type_text", "args": {"text": text}}
+            ]
+
+        # Launch app commands (single action)
         if "open" in user_lower or "launch" in user_lower or "start" in user_lower:
             for app in ["notepad", "chrome", "firefox", "code", "calculator", "calc", "edge"]:
                 if app in user_lower:
@@ -333,12 +366,25 @@ Please try a different approach or correct the error.
             if "get" in user_lower or "read" in user_lower or "show" in user_lower:
                 return {"tool": "get_clipboard", "args": {}}
             if "copy" in user_lower or "set" in user_lower:
-                # Try to extract text after "copy" or in quotes
-                match = re.search(r'"([^"]+)"', user_input)
+                # Try to extract text in quotes
+                match = re.search(r"['\"]([^'\"]+)['\"]", user_input)
                 if match:
                     return {"tool": "set_clipboard", "args": {"text": match.group(1)}}
 
-        # Window commands
+        # "Copy X to clipboard" (without the word clipboard first)
+        if "copy" in user_lower and "clipboard" in user_lower:
+            match = re.search(r"['\"]([^'\"]+)['\"]", user_input)
+            if match:
+                return {"tool": "set_clipboard", "args": {"text": match.group(1)}}
+
+        # Batch minimize: "minimize all X windows" or "minimize all"
+        if "minimize" in user_lower and "all" in user_lower:
+            for app in ["chrome", "firefox", "notepad", "code", "explorer"]:
+                if app in user_lower:
+                    return {"tool": "minimize_all", "args": {"filter_name": app}}
+            return {"tool": "minimize_all", "args": {}}
+
+        # Single window minimize
         if "minimize" in user_lower:
             for app in ["notepad", "chrome", "firefox", "code", "explorer"]:
                 if app in user_lower:
@@ -461,6 +507,13 @@ class Orchestrator:
 
         return result
 
+    # Tools that need latency injection (wait for UI to appear)
+    LATENCY_TOOLS = {
+        "launch_app": 2.0,      # Wait 2s for app window to appear
+        "open_explorer": 1.0,   # Wait 1s for Explorer window
+        "focus_window": 0.3,    # Brief wait for focus change
+    }
+
     def _execute_single_action(self, decision: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a single tool action. Used for multi-action sequences."""
         tool_name = decision.get("tool")
@@ -481,6 +534,13 @@ class Orchestrator:
             result = func(**args)
             result = self._sanitize_output(result)
             print(f"  -> {tool_name}: {result.get('message', result.get('status'))}")
+
+            # Latency injection: wait for UI after certain tools
+            if tool_name in self.LATENCY_TOOLS and result.get("status") == "success":
+                delay = self.LATENCY_TOOLS[tool_name]
+                print(f"  [WAIT] Waiting {delay}s for UI...")
+                time.sleep(delay)
+
             return result
         except Exception as e:
             return {"status": "error", "message": f"{tool_name} failed: {e}"}
@@ -508,11 +568,21 @@ class Orchestrator:
                 if not decision:
                     return {"status": "error", "message": "Empty action list"}
                 results = []
+                action_summaries = []
                 for action in decision:
                     result = self._execute_single_action(action)
                     results.append(result)
+                    # Build summary of what was done
+                    tool = action.get("tool", "unknown")
+                    args = action.get("args", {})
+                    action_summaries.append(f"{tool}({', '.join(f'{k}={v}' for k, v in args.items())})")
                     if result.get("status") == "cancelled":
                         break  # Stop if user cancels
+
+                # Record what was done in history (so LLM knows not to repeat)
+                summary = "Executed: " + " -> ".join(action_summaries)
+                self.context.add_turn("assistant", summary)
+
                 return {"status": "success", "message": f"Executed {len(results)} actions", "results": results}
 
             tool_name = decision.get("tool")
@@ -651,22 +721,24 @@ class LocalAgent:
 # =============================================================================
 
 TEST_COMMANDS = [
+    # Basic commands
     "Set brightness to 50",
-    "Set brightness to 100",
     "List all open windows",
-    "Minimize Notepad",
     "Focus Chrome",
-    "List files in Downloads",
-    "List files in Desktop",
     "Show system info",
-    "Check running processes",
-    "Find python processes",
-    "Switch to desktop 2",
-    # New commands
+    # App launching
     "Open Notepad",
     "Open Downloads folder",
-    "Get clipboard content",
     "Launch Calculator",
+    # Multi-step commands (LLM should return list of actions)
+    "Open Notepad and type 'Hello World'",
+    "Open Notepad and paste 'coucou owl'",
+    # Batch operations (smart tools)
+    "Minimize all Chrome windows",
+    "Minimize all windows",
+    # Clipboard
+    "Get clipboard content",
+    "Copy 'test message' to clipboard",
 ]
 
 
