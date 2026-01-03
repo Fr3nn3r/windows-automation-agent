@@ -22,6 +22,7 @@ def minimize_window(app_name: str):
 
 import pywinctl
 import pyvda
+import pyautogui
 import re
 import time
 from typing import Dict, List, Union, Optional
@@ -85,8 +86,10 @@ class WindowManager:
         target = self._find_window(app_name)
         if not target:
             return {"status": "error", "message": f"Window '{app_name}' not found."}
-        
+
         try:
+            # Bypass Windows Focus Stealing Prevention by pressing Alt
+            pyautogui.press('alt')
             target.activate()
             return {"status": "success", "message": f"Focused: {target.title}"}
         except Exception as e:

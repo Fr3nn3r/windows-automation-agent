@@ -1,10 +1,13 @@
 import os
 import shutil
+import subprocess
 import psutil
 import wmi
 import platform
 import socket
 from typing import Dict, List, Union, Optional
+
+import pyperclip
 
 class SystemTools:
     """
@@ -158,10 +161,133 @@ class SystemTools:
                 
             # Filter out duplicates (common in WMI)
             unique_devices = list(set(device_list))
-            
+
             return {"status": "success", "devices": unique_devices}
         except Exception as e:
             return {"status": "error", "message": str(e)}
+
+    # --- APP LAUNCHER ---
+
+    # Common app shortcuts for quick launch
+    APP_SHORTCUTS = {
+        "notepad": "notepad.exe",
+        "calculator": "calc.exe",
+        "calc": "calc.exe",
+        "explorer": "explorer.exe",
+        "cmd": "cmd.exe",
+        "powershell": "powershell.exe",
+        "chrome": "chrome.exe",
+        "edge": "msedge.exe",
+        "firefox": "firefox.exe",
+        "code": "code",
+        "vscode": "code",
+    }
+
+    def launch_app(self, app_name: str) -> Dict[str, Union[str, int]]:
+        """
+        Launch an application by name or path.
+        Uses subprocess.Popen for non-blocking execution.
+
+        Args:
+            app_name: Application name (e.g., "notepad", "calc") or full path
+
+        Returns:
+            Dict with status, message, and pid if successful
+        """
+        try:
+            # Resolve shortcut or use as-is
+            executable = self.APP_SHORTCUTS.get(app_name.lower(), app_name)
+
+            # Launch non-blocking
+            process = subprocess.Popen(
+                executable,
+                shell=True,  # Allow PATH resolution
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+
+            return {
+                "status": "success",
+                "message": f"Launched: {app_name}",
+                "pid": process.pid
+            }
+        except Exception as e:
+            return {"status": "error", "message": f"Failed to launch {app_name}: {e}"}
+
+    def open_explorer(self, path: str = ".") -> Dict[str, str]:
+        """
+        Open Windows Explorer at a specific path.
+        Uses os.startfile for native Windows behavior.
+
+        Args:
+            path: Directory path to open (defaults to current directory)
+
+        Returns:
+            Dict with status and message
+        """
+        try:
+            target_path = os.path.expanduser(path)
+
+            if not os.path.exists(target_path):
+                return {"status": "error", "message": f"Path does not exist: {target_path}"}
+
+            if not os.path.isdir(target_path):
+                # If it's a file, open its parent directory
+                target_path = os.path.dirname(target_path)
+
+            os.startfile(target_path)
+
+            return {
+                "status": "success",
+                "message": f"Opened Explorer at: {target_path}"
+            }
+        except Exception as e:
+            return {"status": "error", "message": f"Failed to open Explorer: {e}"}
+
+    # --- CLIPBOARD ---
+
+    def get_clipboard(self) -> Dict[str, Union[str, int]]:
+        """
+        Get the current clipboard text content.
+
+        Returns:
+            Dict with status and clipboard content
+        """
+        try:
+            content = pyperclip.paste()
+
+            # Truncate if too long to prevent context flooding
+            original_length = len(content)
+            if original_length > 1000:
+                content = content[:1000] + "... [truncated]"
+
+            return {
+                "status": "success",
+                "content": content,
+                "length": original_length
+            }
+        except Exception as e:
+            return {"status": "error", "message": f"Failed to read clipboard: {e}"}
+
+    def set_clipboard(self, text: str) -> Dict[str, str]:
+        """
+        Set text to the clipboard.
+
+        Args:
+            text: Text to copy to clipboard
+
+        Returns:
+            Dict with status and message
+        """
+        try:
+            pyperclip.copy(text)
+
+            return {
+                "status": "success",
+                "message": f"Copied {len(text)} characters to clipboard"
+            }
+        except Exception as e:
+            return {"status": "error", "message": f"Failed to set clipboard: {e}"}
 
 # --- Usage Example ---
 if __name__ == "__main__":

@@ -1,11 +1,9 @@
 [project]
-name = "google-voice-agent"
-version = "0.1.0"
-description = "Google Voice Agent"
-readme = "README.md"
+name = "windows-automation-agent"
+version = "0.2.0"
+description = "Windows Automation Agent with Brain/Body/Orchestrator Architecture"
 requires-python = ">=3.10"
 dependencies = [
-    "pipecat-ai[google,silero]",
     "python-dotenv",
     "groq",
     "screen-brightness-control",
@@ -13,6 +11,8 @@ dependencies = [
     "pyvda",
     "psutil",
     "wmi",
+    "pyperclip",
+    "pyautogui",
 ]
 
 [project.optional-dependencies]
@@ -20,10 +20,17 @@ dev = [
     "pytest",
     "ruff",
 ]
+voice = [
+    "pipecat-ai[google,silero]",
+]
 
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["main_agent", "agent", "groq_agent", "list_devices"]
+packages = ["tools", "tests"]
 
 [tool.ruff]
 line-length = 88
