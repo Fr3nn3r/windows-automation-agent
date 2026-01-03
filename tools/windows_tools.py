@@ -32,19 +32,68 @@ from typing import Dict, List, Union, Optional
 class WindowManager:
     """
     Manages application windows and virtual desktops.
-    Includes 'Smart Search' to find windows by partial names (e.g., 'Code' -> 'VS Code').
+
+    Features:
+    - Session-scoped window IDs for reliable window targeting
+    - Smart search fallback for partial name matching
+    - Filters out invisible system windows
     """
 
-    # --- HELPER: Smart Search ---
-    # Windows to skip (helper/legacy windows that don't work with desktop APIs)
-    SKIP_WINDOWS = ['legacy window', 'helper', 'notification', 'widget']
+    # Windows to skip (invisible/system windows that clutter listings)
+    SKIP_TITLES = [
+        'legacy window', 'helper', 'notification', 'widget',
+        'Program Manager', 'Settings', 'Microsoft Text Input Application',
+        'Windows Input Experience', 'DesktopWindowXamlSource',
+        'MSCTFIME UI', 'Default IME', 'MediaContextNotificationWindow',
+    ]
+
+    def __init__(self):
+        # Cache maps simple IDs (1, 2, 3) to Window objects
+        self._window_cache: Dict[int, pywinctl.Window] = {}
+
+    def _is_real_window(self, win: pywinctl.Window) -> bool:
+        """Filters out invisible system windows and clutter."""
+        if not win.title:
+            return False
+        try:
+            if not win.isVisible:
+                return False
+        except Exception:
+            pass  # Some windows don't support isVisible
+
+        # Filter by title
+        title_lower = win.title.lower()
+        for skip in self.SKIP_TITLES:
+            if skip.lower() in title_lower:
+                return False
+
+        return True
+
+    def _get_window(self, query: Union[int, str]) -> Optional[pywinctl.Window]:
+        """
+        Smart resolver: Accepts window ID (int) OR title (str).
+        Priority:
+        1. ID match from cache (fastest, most reliable)
+        2. ID as string (e.g., LLM sends "1" instead of 1)
+        3. Title search fallback (legacy compatibility)
+        """
+        # 1. Try ID Match (Fastest & Most Reliable)
+        if isinstance(query, int):
+            return self._window_cache.get(query)
+
+        # 2. Try ID inside String (e.g., LLM sends "1")
+        if isinstance(query, str) and query.isdigit():
+            return self._window_cache.get(int(query))
+
+        # 3. Fallback to Title Search (Legacy/Slow)
+        return self._find_window(query)
 
     def _find_window(self, query: str) -> Optional[pywinctl.Window]:
         """
-        Private helper: Finds the best matching window object.
+        Private helper: Finds the best matching window object by title.
         Priority:
         1. Exact Match (Title)
-        2. Case-insensitive Substring (Title) - prefers real windows over helper windows
+        2. Case-insensitive Substring (Title) - prefers real windows
         """
         all_windows = pywinctl.getAllWindows()
         query_lower = query.lower()
@@ -57,40 +106,69 @@ class WindowManager:
         # 2. Substring Match (Case Insensitive)
         matches = [w for w in all_windows if query_lower in w.title.lower()]
         if matches:
-            # Filter out helper/legacy windows
+            # Filter out system/helper windows
             real_windows = [
                 w for w in matches
-                if not any(skip in w.title.lower() for skip in self.SKIP_WINDOWS)
+                if not any(skip.lower() in w.title.lower() for skip in self.SKIP_TITLES)
             ]
 
             # Prefer real windows, fall back to all matches
             candidates = real_windows if real_windows else matches
 
-            # Sort by title length (longer titles usually mean main windows with page titles)
-            # e.g., "Google Gemini - Google Chrome" > "Chrome"
+            # Sort by title length (longer titles usually mean main windows)
             candidates.sort(key=lambda x: len(x.title), reverse=True)
             return candidates[0]
 
         return None
 
     # --- WINDOW COMMANDS ---
-    
-    def list_open_windows(self) -> Dict[str, List[str]]:
-        """Returns a list of all visible window titles for the agent to see."""
+
+    def list_open_windows(self) -> Dict[str, Union[List[str], int, str]]:
+        """
+        Lists windows and assigns them temporary IDs for the session.
+        Returns a clean list: "1. Notepad", "2. Chrome - YouTube"
+
+        The IDs can be used with other commands (focus_window, minimize_window, etc.)
+        for reliable window targeting.
+        """
         try:
-            titles = [w.title for w in pywinctl.getAllWindows() if w.title]
-            return {"status": "success", "windows": titles, "count": len(titles)}
+            self._window_cache.clear()  # Reset cache on every fresh list
+
+            raw_windows = pywinctl.getAllWindows()
+            clean_list = []
+            id_counter = 1
+
+            for win in raw_windows:
+                if self._is_real_window(win):
+                    self._window_cache[id_counter] = win
+                    clean_list.append(f"{id_counter}. {win.title}")
+                    id_counter += 1
+
+            return {
+                "status": "success",
+                "windows": clean_list,
+                "count": len(clean_list),
+                "note": "Use these IDs (1, 2, etc.) with focus_window, minimize_window, etc."
+            }
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
-    def focus_window(self, app_name: str) -> Dict[str, str]:
+    def focus_window(self, window_id: Union[int, str] = None, app_name: str = None) -> Dict[str, str]:
         """
         Brings a window to the front using low-level OS calls.
         Uses ctypes to bypass Windows Focus Stealing Prevention.
+
+        Args:
+            window_id: Window ID from list_windows (preferred) OR window title
+            app_name: Legacy parameter, same as window_id (for backward compatibility)
         """
-        target = self._find_window(app_name)
+        query = window_id if window_id is not None else app_name
+        if query is None:
+            return {"status": "error", "message": "Must provide window_id or app_name"}
+
+        target = self._get_window(query)
         if not target:
-            return {"status": "error", "message": f"Window '{app_name}' not found."}
+            return {"status": "error", "message": f"Window '{query}' not found. Run list_windows first to get IDs."}
 
         try:
             hwnd = target.getHandle()
@@ -130,35 +208,65 @@ class WindowManager:
             except Exception as e2:
                 return {"status": "error", "message": f"Could not focus window: {str(e)} / {str(e2)}"}
 
-    def minimize_window(self, app_name: str) -> Dict[str, str]:
-        """Minimizes a window."""
-        target = self._find_window(app_name)
+    def minimize_window(self, window_id: Union[int, str] = None, app_name: str = None) -> Dict[str, str]:
+        """
+        Minimizes a window.
+
+        Args:
+            window_id: Window ID from list_windows (preferred) OR window title
+            app_name: Legacy parameter (for backward compatibility)
+        """
+        query = window_id if window_id is not None else app_name
+        if query is None:
+            return {"status": "error", "message": "Must provide window_id or app_name"}
+
+        target = self._get_window(query)
         if not target:
-            return {"status": "error", "message": f"Window '{app_name}' not found."}
-        
+            return {"status": "error", "message": f"Window '{query}' not found."}
+
         try:
             target.minimize()
             return {"status": "success", "message": f"Minimized: {target.title}"}
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
-    def maximize_window(self, app_name: str) -> Dict[str, str]:
-        """Maximizes a window."""
-        target = self._find_window(app_name)
+    def maximize_window(self, window_id: Union[int, str] = None, app_name: str = None) -> Dict[str, str]:
+        """
+        Maximizes a window.
+
+        Args:
+            window_id: Window ID from list_windows (preferred) OR window title
+            app_name: Legacy parameter (for backward compatibility)
+        """
+        query = window_id if window_id is not None else app_name
+        if query is None:
+            return {"status": "error", "message": "Must provide window_id or app_name"}
+
+        target = self._get_window(query)
         if not target:
-            return {"status": "error", "message": f"Window '{app_name}' not found."}
-        
+            return {"status": "error", "message": f"Window '{query}' not found."}
+
         try:
             target.maximize()
             return {"status": "success", "message": f"Maximized: {target.title}"}
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
-    def close_window(self, app_name: str) -> Dict[str, str]:
-        """Closes a window. Warning: This works like clicking 'X'."""
-        target = self._find_window(app_name)
+    def close_window(self, window_id: Union[int, str] = None, app_name: str = None) -> Dict[str, str]:
+        """
+        Closes a window. Warning: This works like clicking 'X'.
+
+        Args:
+            window_id: Window ID from list_windows (preferred) OR window title
+            app_name: Legacy parameter (for backward compatibility)
+        """
+        query = window_id if window_id is not None else app_name
+        if query is None:
+            return {"status": "error", "message": "Must provide window_id or app_name"}
+
+        target = self._get_window(query)
         if not target:
-            return {"status": "error", "message": f"Window '{app_name}' not found."}
+            return {"status": "error", "message": f"Window '{query}' not found."}
 
         try:
             target.close()
@@ -220,7 +328,7 @@ class WindowManager:
                     continue
 
                 # Skip helper/system windows
-                if any(skip in win.title.lower() for skip in self.SKIP_WINDOWS):
+                if any(skip.lower() in win.title.lower() for skip in self.SKIP_TITLES):
                     continue
 
                 # Filter check
@@ -256,7 +364,7 @@ class WindowManager:
             for win in all_windows:
                 if not win.title:
                     continue
-                if any(skip in win.title.lower() for skip in self.SKIP_WINDOWS):
+                if any(skip.lower() in win.title.lower() for skip in self.SKIP_TITLES):
                     continue
                 if filter_name and filter_name.lower() not in win.title.lower():
                     continue
@@ -315,8 +423,20 @@ class WindowManager:
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
-    def move_window_to_desktop(self, app_name: str, desktop_index: int) -> Dict[str, str]:
-        """Moves a specific window to another desktop."""
+    def move_window_to_desktop(
+        self,
+        desktop_index: int,
+        window_id: Union[int, str] = None,
+        app_name: str = None
+    ) -> Dict[str, str]:
+        """
+        Moves a specific window to another desktop.
+
+        Args:
+            desktop_index: Target desktop (1-indexed)
+            window_id: Window ID from list_windows (preferred) OR window title
+            app_name: Legacy parameter (for backward compatibility)
+        """
         # Validate desktop_index is an integer
         if not isinstance(desktop_index, int):
             try:
@@ -324,9 +444,13 @@ class WindowManager:
             except (ValueError, TypeError):
                 return {"status": "error", "message": f"desktop_index must be an integer, got: {desktop_index}"}
 
-        target = self._find_window(app_name)
+        query = window_id if window_id is not None else app_name
+        if query is None:
+            return {"status": "error", "message": "Must provide window_id or app_name"}
+
+        target = self._get_window(query)
         if not target:
-            return {"status": "error", "message": f"Window '{app_name}' not found."}
+            return {"status": "error", "message": f"Window '{query}' not found."}
 
         try:
             desktops = pyvda.get_virtual_desktops()

@@ -226,14 +226,15 @@ class Brain:
 Tools and their EXACT argument names:
 - set_brightness: args: {"level": <int 0-100>}
 - turn_screen_off: args: {}
-- list_windows: args: {}
-- focus_window: args: {"app_name": "<window name>"}
-- minimize_window: args: {"app_name": "<window name>"}
+- list_windows: args: {} -> Returns numbered list like "1. Notepad", "2. Chrome". Use IDs for other commands.
+- focus_window: args: {"window_id": <int or string>} - PREFER using ID from list_windows
+- minimize_window: args: {"window_id": <int or string>}
+- maximize_window: args: {"window_id": <int or string>}
 - minimize_all: args: {"filter_name": "<optional>"} - Smart batch: minimizes ALL windows (or filtered)
-- close_window: args: {"app_name": "<window name>"} [DESTRUCTIVE - requires confirmation]
+- close_window: args: {"window_id": <int or string>} [DESTRUCTIVE - requires confirmation]
 - list_desktops: args: {} - returns current desktop index and total count
 - switch_desktop: args: {"index": <int>} - desktop indexes start at 1
-- move_window: args: {"app_name": "<window name>", "desktop_index": <int>}
+- move_window: args: {"window_id": <int or string>, "desktop_index": <int>}
 - list_files: args: {"path": "<directory path>"}
 - get_sys_info: args: {}
 - check_processes: args: {"filter_name": "<optional process name>"} or {}
@@ -244,11 +245,16 @@ Tools and their EXACT argument names:
 - set_clipboard: args: {"text": "<text to copy>"}
 - type_text: args: {"text": "<text to type>"} - Types/pastes text into focused window
 
+WINDOW ID STRATEGY:
+- list_windows returns IDs like "1. Notepad", "2. Chrome - YouTube"
+- Use these IDs (1, 2, etc.) for focus_window, minimize_window, close_window, move_window
+- IDs are STABLE even if the window title changes (e.g., Notepad -> *Untitled)
+- For "minimize all X", use minimize_all with filter_name, NOT multiple minimize_window calls
+
 IMPORTANT:
 - When user says "current desktop", first call list_desktops to get the current_index.
 - All argument values must be the correct type: integers for index/level, strings for names/paths.
 - For paths, you can use ~ to refer to the user's home directory.
-- For "minimize all X windows", use minimize_all with filter_name, NOT multiple minimize_window calls.
 """
 
         context_info = f"""
