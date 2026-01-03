@@ -18,9 +18,10 @@ import time
 import re
 import uuid
 import getpass
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, Any, List, Optional, Union, Callable
+from typing import Dict, Any, List, Optional, Union, Callable, Deque
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -58,8 +59,8 @@ class AgentContext:
     """
     # --- Session State ---
     session_id: str
-    history: List[ConversationTurn] = field(default_factory=list)
     max_history: int = 10  # Last N turns to include in prompt
+    history: Deque[ConversationTurn] = field(default_factory=lambda: deque(maxlen=10))
 
     # --- Environment State ---
     cwd: str = field(default_factory=lambda: os.path.expanduser("~"))
@@ -75,12 +76,12 @@ class AgentContext:
     last_error: Optional[str] = None
 
     def add_turn(self, role: str, content: str, **kwargs):
-        """Add a conversation turn and trim history if needed."""
+        """Add a conversation turn. Deque auto-removes oldest entries."""
+        # Sanitize content to prevent context overflow (max 1000 chars)
+        if len(content) > 1000:
+            content = content[:1000] + "... [TRUNCATED]"
         turn = ConversationTurn(role=role, content=content, **kwargs)
-        self.history.append(turn)
-        # Trim to max_history
-        if len(self.history) > self.max_history:
-            self.history = self.history[-self.max_history:]
+        self.history.append(turn)  # deque auto-removes old entries
 
     def get_history_for_prompt(self) -> List[Dict[str, str]]:
         """Format history for LLM messages array."""
@@ -106,6 +107,22 @@ class AgentContext:
                 self.active_window = windows[0] if windows else None
             except Exception:
                 self.active_window = None
+
+    def estimate_context_tokens(self) -> int:
+        """Estimate tokens used by history. Rough estimate: 1 token ≈ 4 chars."""
+        total_chars = sum(len(turn.content) for turn in self.history)
+        return total_chars // 4
+
+    def get_context_usage(self, system_prompt_tokens: int = 1500) -> tuple:
+        """
+        Returns (used_tokens, max_tokens, percentage).
+        Groq Llama models have 8192 token context window.
+        """
+        max_tokens = 8192
+        history_tokens = self.estimate_context_tokens()
+        used = system_prompt_tokens + history_tokens
+        pct = min(100, int((used / max_tokens) * 100))
+        return used, max_tokens, pct
 
 
 # =============================================================================
@@ -186,11 +203,17 @@ class Brain:
     """
     Atomic Decision Maker - stateless LLM wrapper.
     Takes context + query, outputs JSON decision.
-    """
 
-    def __init__(self, client, model: str = "llama-3.1-8b-instant"):
+    Two-Gear Strategy:
+    - 8B (default): Fast (~1200 t/s), good for simple commands
+    - 70B (fallback): Smarter (~300 t/s), for complex reasoning
+    """
+    MODEL_FAST = "llama-3.1-8b-instant"      # The Intern - fast but limited
+    MODEL_SMART = "llama-3.1-70b-versatile"  # The Senior - slower but smarter
+
+    def __init__(self, client, model: str = None, use_smart_model: bool = False):
         self.client = client
-        self.model = model
+        self.model = model or (self.MODEL_SMART if use_smart_model else self.MODEL_FAST)
 
     def _build_system_prompt(self, context: AgentContext) -> str:
         """Build system prompt with context awareness."""
@@ -269,7 +292,8 @@ Please try a different approach or correct the error.
                 model=self.model,
                 messages=messages,
                 response_format={"type": "json_object"},
-                temperature=0.0
+                temperature=0.0,
+                max_tokens=512  # Keep output concise for context limits
             )
             latency = (time.time() - start) * 1000
 
@@ -437,6 +461,30 @@ class Orchestrator:
 
         return result
 
+    def _execute_single_action(self, decision: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a single tool action. Used for multi-action sequences."""
+        tool_name = decision.get("tool")
+        args = decision.get("args", {})
+
+        if tool_name == "error":
+            return {"status": "error", "message": args.get("message", "Unknown error")}
+
+        # Confirm if destructive
+        if not self._confirm_destructive_action(tool_name, args):
+            return {"status": "cancelled", "message": f"User cancelled {tool_name}"}
+
+        func = self.body.get(tool_name)
+        if not func:
+            return {"status": "error", "message": f"Tool '{tool_name}' not found"}
+
+        try:
+            result = func(**args)
+            result = self._sanitize_output(result)
+            print(f"  -> {tool_name}: {result.get('message', result.get('status'))}")
+            return result
+        except Exception as e:
+            return {"status": "error", "message": f"{tool_name} failed: {e}"}
+
     def process(self, user_input: str) -> Dict[str, Any]:
         """
         Main execution pipeline with error recovery loop.
@@ -455,9 +503,17 @@ class Orchestrator:
             # 1. DECIDE (Brain)
             decision = self.brain.decide(self.context, user_input)
 
-            # Handle LLM returning a list of actions
+            # Handle LLM returning a list of actions - execute all sequentially
             if isinstance(decision, list):
-                decision = decision[0] if decision else {"tool": "error", "args": {"message": "Empty action list"}}
+                if not decision:
+                    return {"status": "error", "message": "Empty action list"}
+                results = []
+                for action in decision:
+                    result = self._execute_single_action(action)
+                    results.append(result)
+                    if result.get("status") == "cancelled":
+                        break  # Stop if user cancels
+                return {"status": "success", "message": f"Executed {len(results)} actions", "results": results}
 
             tool_name = decision.get("tool")
             args = decision.get("args", {})
@@ -543,9 +599,13 @@ class LocalAgent:
     """
     Backward-compatible facade that wraps the new architecture.
     Provides the same interface as the original LocalAgent.
+
+    Args:
+        use_smart_model: If True, uses 70B model for better reasoning (slower).
+                         Default False uses 8B for speed.
     """
 
-    def __init__(self):
+    def __init__(self, use_smart_model: bool = False):
         api_key = os.environ.get("GROQ_API_KEY")
 
         if api_key:
@@ -555,12 +615,15 @@ class LocalAgent:
             client = None
 
         self.body = ToolRegistry()
-        self.brain = Brain(client)
+        self.brain = Brain(client, use_smart_model=use_smart_model)
         self.orchestrator = Orchestrator(self.brain, self.body)
         self.orchestrator.start_session()
 
         # Expose for backward compatibility
         self.tool_registry = self.body._registry
+
+        model_name = "70B (Smart)" if use_smart_model else "8B (Fast)"
+        print(f"[AGENT] Using model: {model_name}")
 
     def execute(self, user_input: str) -> Optional[Dict[str, Any]]:
         """
@@ -572,6 +635,13 @@ class LocalAgent:
 
         status_icon = "[OK]" if result.get("status") == "success" else "[WARN]"
         print(f"{status_icon} Result: {result}")
+
+        # Show context usage
+        used, max_tok, pct = self.orchestrator.context.get_context_usage()
+        bar_len = 20
+        filled = int(bar_len * pct / 100)
+        bar = "#" * filled + "-" * (bar_len - filled)
+        print(f"[CTX] [{bar}] {pct}% ({used}/{max_tok} tokens)")
 
         return result
 
@@ -617,29 +687,45 @@ def show_menu():
 # =============================================================================
 
 if __name__ == "__main__":
-    agent = LocalAgent()
+    import sys
+
+    # Setup readline for arrow key history navigation
+    try:
+        import readline
+    except ImportError:
+        try:
+            import pyreadline3 as readline
+        except ImportError:
+            readline = None
+
+    # Pre-populate history with test commands (reverse so first is most recent)
+    if readline:
+        for cmd in reversed(TEST_COMMANDS):
+            readline.add_history(cmd)
+
+    # Check for --smart flag to use 70B model
+    use_smart = "--smart" in sys.argv or "-s" in sys.argv
+
+    agent = LocalAgent(use_smart_model=use_smart)
 
     print("[AGENT] Windows Automation Agent Initialized.")
     print(f"[AGENT] Session: {agent.orchestrator.context.session_id}")
     print(f"[AGENT] Working Directory: {agent.orchestrator.context.cwd}")
-    print("Type a number to run a test command, or type your own command.")
+    print("Tip: Use UP/DOWN arrows to cycle through commands. '--smart' for 70B model.")
+    show_menu()  # Show menu once at start
 
     while True:
-        show_menu()
         req = input("\n> ").strip()
 
-        if req.lower() in ["exit", "quit", "0"]:
+        if req.lower() in ["exit", "quit", "q"]:
             print("Goodbye!")
             break
 
-        # Check if input is a number (menu selection)
-        if req.isdigit():
-            idx = int(req)
-            if 1 <= idx <= len(TEST_COMMANDS):
-                req = TEST_COMMANDS[idx - 1]
-                print(f"\n[SELECTED] {req}")
-            else:
-                print(f"[ERROR] Invalid selection. Choose 1-{len(TEST_COMMANDS)} or 0 to exit.")
-                continue
+        if req.lower() == "help":
+            show_menu()
+            continue
+
+        if not req:
+            continue
 
         agent.execute(req)
