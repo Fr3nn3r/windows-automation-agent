@@ -1,0 +1,36 @@
+[project]
+name = "google-voice-agent"
+version = "0.1.0"
+description = "Google Voice Agent"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pipecat-ai[google,silero]",
+    "python-dotenv",
+    "groq",
+    "screen-brightness-control",
+    "pywinctl",
+    "pyvda",
+    "psutil",
+    "wmi",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,8 @@
+pipecat-ai[google,silero,local]
+python-dotenv
+groq
+screen-brightness-control
+pywinctl
+pyvda
+psutil
+wmi
