@@ -1,4 +1,5 @@
 # tools/window_tools.py
+import subprocess
 import pyvda
 import pywinctl
 
@@ -40,32 +41,90 @@ class WindowManager:
     """
 
     # Windows to skip (invisible/system windows that clutter listings)
+    # These are partial matches (case-insensitive)
     SKIP_TITLES = [
-        'legacy window', 'helper', 'notification', 'widget',
+        # Windows system junk
         'Program Manager', 'Settings', 'Microsoft Text Input Application',
         'Windows Input Experience', 'DesktopWindowXamlSource',
         'MSCTFIME UI', 'Default IME', 'MediaContextNotificationWindow',
+        'legacy window', 'helper', 'notification', 'widget',
+        # Input/focus system windows
+        'CoreInput', 'Non Client Input Sink', 'Input Sink',
+        'Running applications', 'Filter Control',
+        # Glass/visual effect windows
+        'Glass Window',
+        # Task Manager internals
+        'TaskManagerMain',
+        # Explorer shell internals (but not File Explorer windows)
+        'Namespace Tree Control', 'Navigation Pane', 'ShellView',
+        'ReunionCaptionControlsWindow',
+        # Adobe Acrobat internals
+        'TopTabBarContainerViewForDocs', 'AVUITopRightCommandCluster',
+        'AVTabLinksContainerViewForDocs', 'AVTabsContainerView',
+        'AVDocumentMainView', 'AVTaskPaneHostView', 'AVFlipContainerView',
+        'AVTaskPaneView', 'AVScrollView', 'AppsCefView',
+        'AVTaskPanelTableContainerView', 'AVTableContainerView',
+        'AVTaskPaneBarView', 'AVExpandCollapseButtonView',
+        'AVDocumentHeaderView',
     ]
+
+    # Common app shortcuts for quick launch (same as SystemTools for consistency)
+    APP_SHORTCUTS = {
+        "notepad": "notepad.exe",
+        "calculator": "calc.exe",
+        "calc": "calc.exe",
+        "explorer": "explorer.exe",
+        "cmd": "cmd.exe",
+        "powershell": "powershell.exe",
+        "chrome": r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        "edge": "msedge.exe",
+        "firefox": r"C:\Program Files\Mozilla Firefox\firefox.exe",
+        "code": "code",
+        "vscode": "code",
+    }
 
     def __init__(self):
         # Cache maps simple IDs (1, 2, 3) to Window objects
         self._window_cache: Dict[int, pywinctl.Window] = {}
 
+    # Generic/internal window names that are usually child windows or shell components
+    GENERIC_TITLES = [
+        'Downloads', 'Documents', 'Pictures', 'Videos', 'Music', 'Desktop',
+    ]
+
     def _is_real_window(self, win: pywinctl.Window) -> bool:
         """Filters out invisible system windows and clutter."""
         if not win.title:
             return False
+
+        # Check visibility
         try:
             if not win.isVisible:
                 return False
         except Exception:
             pass  # Some windows don't support isVisible
 
-        # Filter by title
-        title_lower = win.title.lower()
+        # Check window size - very small windows are usually system components
+        try:
+            width = win.width
+            height = win.height
+            if width < 50 or height < 50:
+                return False
+        except Exception:
+            pass
+
+        title = win.title
+        title_lower = title.lower()
+
+        # Filter by skip list (partial match)
         for skip in self.SKIP_TITLES:
             if skip.lower() in title_lower:
                 return False
+
+        # Filter exact matches of generic folder names (these are shell components)
+        # Real File Explorer windows have " - File Explorer" suffix
+        if title in self.GENERIC_TITLES:
+            return False
 
         return True
 
@@ -152,6 +211,91 @@ class WindowManager:
             }
         except Exception as e:
             return {"status": "error", "message": str(e)}
+
+    # --- APP LAUNCHER WITH AUTO-FOCUS ---
+
+    def launch_app(self, app_name: str) -> Dict[str, str]:
+        """
+        Launches an application and waits for its window to appear, then focuses it.
+
+        This solves the "time gap" problem where:
+        1. Python launches the process instantly
+        2. Windows takes ~500ms+ to create the window
+        3. Trying to focus immediately fails
+
+        Uses a polling loop to wait for the window to appear (up to 5 seconds).
+
+        Args:
+            app_name: Application name (e.g., "notepad", "chrome") or full path
+
+        Returns:
+            Dict with status and message
+        """
+        # Resolve shortcut or use as-is
+        executable = self.APP_SHORTCUTS.get(app_name.lower(), app_name)
+
+        try:
+            # 1. Launch the process
+            proc = subprocess.Popen(
+                executable,
+                shell=True,  # Allow PATH resolution
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            pid = proc.pid
+
+            # 2. Wait for the window to appear (Max 5 seconds)
+            # We poll every 0.2s to see if a matching window exists
+            found_window = None
+            start_time = time.time()
+
+            while time.time() - start_time < 5.0:
+                # Refresh our internal window list
+                self.list_open_windows()
+
+                # Strategy: Look for a window containing the app name
+                # (e.g., "notepad" matches "Untitled - Notepad")
+                app_name_lower = app_name.lower()
+
+                for win_id, win in self._window_cache.items():
+                    if app_name_lower in win.title.lower():
+                        found_window = win_id
+                        break
+
+                if found_window:
+                    break
+
+                time.sleep(0.2)
+
+            # 3. Focus it if found
+            if found_window:
+                # Give it a tiny moment to finish rendering
+                time.sleep(0.3)
+                focus_result = self.focus_window(found_window)
+
+                if focus_result.get("status") == "success":
+                    return {
+                        "status": "success",
+                        "message": f"Launched and focused: {app_name}",
+                        "pid": pid
+                    }
+                else:
+                    return {
+                        "status": "success",
+                        "message": f"Launched {app_name} (focus attempt: {focus_result.get('message')})",
+                        "pid": pid
+                    }
+            else:
+                return {
+                    "status": "success",
+                    "message": f"Launched {app_name}, but could not find window to focus (timed out)",
+                    "pid": pid
+                }
+
+        except FileNotFoundError:
+            return {"status": "error", "message": f"App executable not found: {executable}"}
+        except Exception as e:
+            return {"status": "error", "message": f"Failed to launch {app_name}: {e}"}
 
     def focus_window(self, window_id: Union[int, str] = None, app_name: str = None) -> Dict[str, str]:
         """
@@ -305,16 +449,23 @@ class WindowManager:
 
     # --- BATCH OPERATIONS ---
 
+    # Windows Shell components that should NEVER be minimized
+    SHELL_SAFE_LIST = [
+        "Program Manager",  # Desktop background
+        "Windows Explorer",  # File browser
+        "Taskbar",  # Taskbar
+    ]
+
     def minimize_all(self, filter_name: str = None) -> Dict[str, Union[str, int]]:
         """
-        Smart batch tool: Minimizes all windows, optionally filtered by name.
+        Safely minimizes applications, keeping Desktop and Explorer visible.
 
         Args:
             filter_name: Optional - only minimize windows containing this text.
-                        If None, minimizes ALL windows.
+                        If None, minimizes ALL app windows (keeps shell safe).
 
         Examples:
-            minimize_all() -> minimizes everything
+            minimize_all() -> minimizes all apps (keeps Explorer visible)
             minimize_all("chrome") -> minimizes all Chrome windows
         """
         try:
@@ -323,12 +474,15 @@ class WindowManager:
             all_windows = pywinctl.getAllWindows()
 
             for win in all_windows:
-                # Skip empty titles (system windows)
-                if not win.title:
+                # Skip non-real windows
+                if not self._is_real_window(win):
                     continue
 
-                # Skip helper/system windows
-                if any(skip.lower() in win.title.lower() for skip in self.SKIP_TITLES):
+                # SAFETY: Never minimize shell components
+                if win.title in self.SHELL_SAFE_LIST:
+                    continue
+                if "Explorer" in win.title and "File Explorer" not in win.title:
+                    # Skip Windows Explorer shell, but allow File Explorer windows
                     continue
 
                 # Filter check
@@ -337,21 +491,46 @@ class WindowManager:
                         skipped += 1
                         continue
 
+                # Only minimize visible, non-minimized windows
                 try:
-                    win.minimize()
-                    count += 1
+                    if win.isVisible and not win.isMinimized:
+                        win.minimize()
+                        count += 1
                 except Exception:
                     skipped += 1  # Some windows can't be minimized
 
             msg = f"Minimized {count} windows"
             if filter_name:
                 msg += f" matching '{filter_name}'"
-            if skipped > 0:
-                msg += f" ({skipped} skipped)"
+            msg += " (kept Explorer visible)"
 
             return {"status": "success", "message": msg, "count": count}
         except Exception as e:
             return {"status": "error", "message": f"minimize_all failed: {str(e)}"}
+
+    def restore_all(self) -> Dict[str, Union[str, int]]:
+        """
+        The 'Undo' button - restores all minimized windows.
+        Use this if you accidentally minimized too many windows.
+        """
+        try:
+            count = 0
+            all_windows = pywinctl.getAllWindows()
+
+            for win in all_windows:
+                if not self._is_real_window(win):
+                    continue
+
+                try:
+                    if win.isMinimized:
+                        win.restore()
+                        count += 1
+                except Exception:
+                    pass
+
+            return {"status": "success", "message": f"Restored {count} windows.", "count": count}
+        except Exception as e:
+            return {"status": "error", "message": f"restore_all failed: {str(e)}"}
 
     def maximize_all(self, filter_name: str = None) -> Dict[str, Union[str, int]]:
         """

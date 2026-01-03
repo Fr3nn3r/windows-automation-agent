@@ -123,6 +123,18 @@ class TestWindowManager:
         assert hasattr(manager, 'move_window_to_desktop')
         assert callable(manager.move_window_to_desktop)
 
+    def test_launch_app_method_exists(self, manager):
+        """Test that launch_app method exists (poll-and-focus feature)."""
+        assert hasattr(manager, 'launch_app')
+        assert callable(manager.launch_app)
+
+    def test_launch_app_has_app_shortcuts(self, manager):
+        """Test that WindowManager has APP_SHORTCUTS for common apps."""
+        assert hasattr(manager, 'APP_SHORTCUTS')
+        assert isinstance(manager.APP_SHORTCUTS, dict)
+        assert 'notepad' in manager.APP_SHORTCUTS
+        assert 'chrome' in manager.APP_SHORTCUTS
+
     def test_list_open_windows_returns_dict(self, manager):
         """Test list_open_windows returns proper format."""
         result = manager.list_open_windows()

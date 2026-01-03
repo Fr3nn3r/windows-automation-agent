@@ -168,7 +168,8 @@ class ToolRegistry:
             "list_windows": self.windows.list_open_windows,
             "focus_window": self.windows.focus_window,
             "minimize_window": self.windows.minimize_window,
-            "minimize_all": self.windows.minimize_all,  # Smart batch minimize
+            "minimize_all": self.windows.minimize_all,  # Safe batch minimize (keeps Explorer)
+            "restore_all": self.windows.restore_all,  # Undo button - restore minimized
             "maximize_all": self.windows.maximize_all,  # Smart batch maximize
             "close_window": self.windows.close_window,
             "list_desktops": self.windows.list_desktops,
@@ -184,8 +185,8 @@ class ToolRegistry:
             "check_processes": self.system.list_processes,
             "delete_item": self.system.delete_item,
 
-            # --- App Launcher & Clipboard ---
-            "launch_app": self.system.launch_app,
+            # --- App Launcher (with auto-focus) & Clipboard ---
+            "launch_app": self.windows.launch_app,  # Uses poll-and-focus
             "open_explorer": self.system.open_explorer,
             "get_clipboard": self.system.get_clipboard,
             "set_clipboard": self.system.set_clipboard,
@@ -230,7 +231,8 @@ Tools and their EXACT argument names:
 - focus_window: args: {"window_id": <int or string>} - PREFER using ID from list_windows
 - minimize_window: args: {"window_id": <int or string>}
 - maximize_window: args: {"window_id": <int or string>}
-- minimize_all: args: {"filter_name": "<optional>"} - Smart batch: minimizes ALL windows (or filtered)
+- minimize_all: args: {"filter_name": "<optional>"} - Safely minimizes apps (keeps Explorer visible)
+- restore_all: args: {} - The "Undo" button. Restores all minimized windows.
 - close_window: args: {"window_id": <int or string>} [DESTRUCTIVE - requires confirmation]
 - list_desktops: args: {} - returns current desktop index and total count
 - switch_desktop: args: {"index": <int>} - desktop indexes start at 1
@@ -514,8 +516,8 @@ class Orchestrator:
         return result
 
     # Tools that need latency injection (wait for UI to appear)
+    # Note: launch_app now has built-in poll-and-focus, no external delay needed
     LATENCY_TOOLS = {
-        "launch_app": 2.0,      # Wait 2s for app window to appear
         "open_explorer": 1.0,   # Wait 1s for Explorer window
         "focus_window": 0.3,    # Brief wait for focus change
     }
