@@ -59,21 +59,21 @@ class TestHardwareController:
         """Test set_brightness with valid level."""
         result = controller.set_brightness(50)
         assert result['status'] == 'success'
-        assert 'level' in result
+        assert result['target']['level'] == 50
 
     @patch('tools.hardware_tools.sbc')
     def test_set_brightness_clamps_high(self, mock_sbc, controller):
         """Test set_brightness clamps values above 100."""
         result = controller.set_brightness(150)
         assert result['status'] == 'success'
-        assert result['level'] == 100
+        assert result['target']['level'] == 100
 
     @patch('tools.hardware_tools.sbc')
     def test_set_brightness_clamps_low(self, mock_sbc, controller):
         """Test set_brightness clamps values below 0."""
         result = controller.set_brightness(-50)
         assert result['status'] == 'success'
-        assert result['level'] == 0
+        assert result['target']['level'] == 0
 
     @patch('tools.hardware_tools.sbc')
     def test_get_brightness_returns_dict(self, mock_sbc, controller):
