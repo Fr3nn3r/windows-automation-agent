@@ -56,8 +56,8 @@ class LocalAgent:
         self.router = Router(self.brain, self.body)
         self.router.start_session()
 
-        # Expose registry for compatibility
-        self.tool_registry = self.body._registry
+        # Expose registry for compatibility (now delegates to body)
+        self.registry = self.body
 
     def execute(self, user_input: str) -> Optional[Dict[str, Any]]:
         """

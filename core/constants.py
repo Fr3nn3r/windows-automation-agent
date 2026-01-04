@@ -2,31 +2,15 @@
 Constants and configuration for the Windows Automation Agent.
 
 Centralized location for:
-- Destructive action definitions
 - Latency injection configuration
 - Model configuration
+
+Note: Destructive actions are now defined declaratively in tools/tool_specs.py
+via the ToolSpec.destructive and ToolSpec.risk_level attributes.
+Use core.tool_decorator.get_destructive_tools() to retrieve them at runtime.
 """
 
-from typing import Dict, Any
-
-# =============================================================================
-# DESTRUCTIVE ACTIONS
-# =============================================================================
-
-# Actions that require user confirmation before execution
-DESTRUCTIVE_ACTIONS: Dict[str, Dict[str, Any]] = {
-    "delete_item": {
-        "risk": "HIGH",
-        "message": "DELETE file/folder",
-        "target_key": "path"
-    },
-    "close_window": {
-        "risk": "MEDIUM",
-        "message": "CLOSE application window",
-        "target_key": "app_name"
-    },
-}
-
+from typing import Dict
 
 # =============================================================================
 # LATENCY INJECTION

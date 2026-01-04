@@ -10,6 +10,7 @@ from typing import Dict, Any, Optional
 
 from core.protocols import LLMClient
 from core.context import AgentContext
+from core.prompt_builder import build_tools_prompt
 
 
 class Brain:
@@ -31,34 +32,8 @@ class Brain:
 
     def _build_system_prompt(self, context: AgentContext) -> str:
         """Build system prompt with HUD for atomic execution."""
-        tools_spec = """
-Tools and their EXACT argument names:
-- set_brightness: args: {"level": <int 0-100|}
-- turn_screen_off: args: {}
-- turn_screen_on: args: {}
-- list_windows: args: {} -> Returns numbered list like "1. Notepad", "2. Chrome". Use IDs for other commands.
-- focus_window: args: {"window_id": <int or string|}
-- minimize_window: args: {"window_id": <int or string|}
-- maximize_window: args: {"window_id": <int or string|}
-- minimize_all: args: {"filter_name": "<optional>"|}
-- restore_all: args: {}
-- close_window: args: {"window_id": <int or string|}  [DESTRUCTIVE]
-- list_desktops: args: {}
-- switch_desktop: args: {"index": <int|}
-- move_window: args: {"window_id": <int or string>, "desktop_index": <int|}
-- list_files: args: {"path": "<directory path>|}
-- get_sys_info: args: {}
-- check_processes: args: {"filter_name": "<optional>"|} or {}
-- delete_item: args: {"path": "<path>", "confirm": true|}  [DESTRUCTIVE]
-- launch_app: args: {"app_name": "<app name like 'notepad', 'chrome'>|}
-- open_explorer: args: {"path": "<folder path>|}
-- get_clipboard: args: {}
-- set_clipboard: args: {"text": "<text>|}
-- type_text: args: {"text": "<text>"|}
-- get_env: args: {"var_name": "<env var name like 'PATH'>|}
-- list_usb: args: {}
-- change_dir: args: {"path": "<directory path>|}
-"""
+        # Dynamically generated tool specs from the registry
+        tools_spec = build_tools_prompt()
 
         # Get HUD from context
         hud = context.get_hud()

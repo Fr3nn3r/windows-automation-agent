@@ -15,7 +15,8 @@ from typing import Dict, Any, Optional
 
 from core.protocols import DecisionMaker, ToolExecutor
 from core.context import AgentContext
-from core.constants import DESTRUCTIVE_ACTIONS, LATENCY_TOOLS
+from core.constants import LATENCY_TOOLS
+from core.tool_decorator import get_destructive_tools
 
 
 class Router:
@@ -64,10 +65,13 @@ class Router:
         Returns:
             True if user confirms or action is not destructive, False otherwise
         """
-        if tool_name not in DESTRUCTIVE_ACTIONS:
+        # Get destructive tools dynamically from the tool specs
+        destructive_actions = get_destructive_tools()
+
+        if tool_name not in destructive_actions:
             return True  # Non-destructive, proceed
 
-        config = DESTRUCTIVE_ACTIONS[tool_name]
+        config = destructive_actions[tool_name]
         target = args.get(config["target_key"], str(args))
 
         print(f"\n{'='*50}")

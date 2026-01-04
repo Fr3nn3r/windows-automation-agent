@@ -59,15 +59,16 @@ windows-automation-agent/
 │   ├── router.py              # Router (atomic executor)
 │   ├── registry.py            # ToolRegistry (tool mapping)
 │   ├── agent.py               # LocalAgent (facade)
-│   ├── constants.py           # DESTRUCTIVE_ACTIONS, LATENCY_TOOLS
-│   ├── tool_decorator.py      # @tool registration system
-│   └── prompt_builder.py      # Dynamic prompt generation
+│   ├── constants.py           # LATENCY_TOOLS, model configs
+│   ├── tool_decorator.py      # Tool registration with JSON Schema
+│   └── prompt_builder.py      # Dynamic prompt generation from specs
 ├── llm/
 │   ├── __init__.py
 │   ├── groq_adapter.py        # Groq LLM implementation
 │   └── mock_adapter.py        # Mock LLM for testing
 ├── tools/
 │   ├── __init__.py
+│   ├── tool_specs.py          # Declarative tool definitions (JSON Schema)
 │   ├── hardware_tools.py      # Brightness, screen power
 │   ├── windows_tools.py       # Window management, virtual desktops
 │   └── system_tools.py        # File ops, processes, clipboard
@@ -122,17 +123,37 @@ LLM implementations. GroqAdapter uses Groq API; MockLLMAdapter uses pattern matc
 
 ## Destructive Actions
 
-Tools like `close_window`, `delete_item` require user confirmation. The `DESTRUCTIVE_ACTIONS` dict in `core/constants.py` defines which tools need confirmation and their warning messages.
+Tools like `close_window`, `delete_item` require user confirmation. Destructive tools are defined declaratively in `tools/tool_specs.py` via `ToolSpec.destructive=True` and `ToolSpec.risk_level`. Use `core.tool_decorator.get_destructive_tools()` to retrieve them at runtime.
 
-## Adding New Tools
+## Adding New Tools (OCP-Compliant)
 
-1. Implement the tool function in the appropriate `tools/` module
-2. Register it in `core/registry.py` by adding to the `_registry` dict
-3. Update the tool spec in `core/brain.py` `_build_system_prompt()`
+To add a new tool, edit only `tools/tool_specs.py`:
 
-Future: Use the `@tool` decorator from `core/tool_decorator.py` for auto-registration.
+```python
+# 1. Define the spec using JSON Schema helpers
+NEW_TOOL_SPEC = ToolSpec(
+    name="new_tool",
+    description="What the tool does",
+    input_schema=make_schema(
+        properties={
+            "param": string_param("Parameter description"),
+            "level": int_param("Level", minimum=0, maximum=100),
+        },
+        required=["param"]
+    ),
+    destructive=False,  # Set to True if needs confirmation
+    risk_level="LOW",   # LOW, MEDIUM, HIGH
+    returns_description="What it returns"
+)
 
-## Legacy Files
+# 2. Register in register_all_tools()
+register_tool("new_tool", some_class.new_tool_method, NEW_TOOL_SPEC)
 
-- `main_agent.py`: Original monolithic implementation (to be removed)
-- `docs/SOLID_REVIEW_AND_IMPLEMENTATION_PLAN.md`: Historical SOLID analysis
+# 3. Add to ALL_TOOL_SPECS list
+```
+
+No changes needed to brain.py, registry.py, or router.py - the prompt builder generates tool specs dynamically.
+
+## Historical Reference
+
+- `docs/SOLID_REVIEW_AND_IMPLEMENTATION_PLAN.md`: Original SOLID analysis and refactoring plan

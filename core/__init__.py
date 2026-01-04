@@ -7,12 +7,17 @@ for the agent architecture following SOLID principles.
 
 from core.protocols import LLMClient, DecisionMaker, ToolExecutor, StateManager, SafetyGate
 from core.context import AgentContext, ConversationTurn
-from core.constants import DESTRUCTIVE_ACTIONS, LATENCY_TOOLS, MODEL_FAST, MODEL_SMART
+from core.constants import LATENCY_TOOLS, MODEL_FAST, MODEL_SMART
 from core.brain import Brain
 from core.registry import ToolRegistry
 from core.router import Router
 from core.agent import LocalAgent
-from core.tool_decorator import tool, ToolSpec, get_registered_tools
+from core.tool_decorator import (
+    tool,
+    ToolSpec,
+    get_registered_tools,
+    get_destructive_tools,
+)
 
 __all__ = [
     # Protocols
@@ -25,7 +30,6 @@ __all__ = [
     "AgentContext",
     "ConversationTurn",
     # Constants
-    "DESTRUCTIVE_ACTIONS",
     "LATENCY_TOOLS",
     "MODEL_FAST",
     "MODEL_SMART",
@@ -38,4 +42,5 @@ __all__ = [
     "tool",
     "ToolSpec",
     "get_registered_tools",
+    "get_destructive_tools",
 ]
