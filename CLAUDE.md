@@ -6,11 +6,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Windows Automation Agent: An LLM-powered desktop automation system that interprets natural language commands and executes them using Windows system tools. Uses Groq's Llama models for near-instant response times.
 
-**Core Architecture:** Atomic Router pattern
-- **Brain** (`main_agent.py`): LLM Router - maps intent to single tool using Groq (8B fast or 70B smart)
-- **Body** (`ToolRegistry`): Stateless tool executor with ~26 registered tools
-- **Router**: Atomic executor (no loops, no retries, fail fast)
-- **AgentContext**: State-focused HUD (last action, focused window, cwd) with 2-turn memory
+**Core Architecture:** SOLID-compliant modular design
+- **core/**: Core abstractions and implementations
+  - `protocols.py`: Protocol definitions (LLMClient, DecisionMaker, ToolExecutor)
+  - `brain.py`: LLM Router - maps intent to single tool
+  - `router.py`: Atomic executor (no loops, no retries, fail fast)
+  - `registry.py`: Stateless tool executor with ~26 registered tools
+  - `context.py`: State-focused HUD with 2-turn memory
+  - `agent.py`: Public LocalAgent facade
+- **llm/**: LLM adapters (GroqAdapter, MockLLMAdapter)
+- **tools/**: Tool implementations (hardware, windows, system)
 
 **Design Philosophy:** "Stateful Context, Atomic Action"
 - User acts as the Orchestrator
@@ -33,26 +38,59 @@ ruff check .
 ruff format .
 
 # Run the agent
-python main_agent.py           # Default 8B model
-python main_agent.py --smart   # Use 70B model for complex reasoning
+python main.py           # Default 8B model
+python main.py --smart   # Use 70B model for complex reasoning
 ```
 
 ## Environment Setup
 
 Requires `GROQ_API_KEY` in `.env` file. Without it, the agent runs in mock mode with pattern-based responses.
 
-## Key Files
+## Project Structure
 
-- `main_agent.py`: Main entry point containing all core classes:
-  - `AgentContext`: State-focused HUD (last_tool_output, focused_window_cache, 2-turn history)
-  - `ToolRegistry`: Maps tool names to callable functions (~26 tools)
-  - `Brain`: Builds prompts with HUD, calls Groq API, enforces atomic output
-  - `Router`: Atomic executor - no loops, no retries, fail fast
-  - `LocalAgent`: Public facade
+```
+windows-automation-agent/
+├── main.py                    # CLI entry point
+├── core/
+│   ├── __init__.py
+│   ├── protocols.py           # ABCs/Protocols (LLMClient, DecisionMaker, etc.)
+│   ├── context.py             # AgentContext, ConversationTurn
+│   ├── brain.py               # Brain (LLM decision maker)
+│   ├── router.py              # Router (atomic executor)
+│   ├── registry.py            # ToolRegistry (tool mapping)
+│   ├── agent.py               # LocalAgent (facade)
+│   ├── constants.py           # DESTRUCTIVE_ACTIONS, LATENCY_TOOLS
+│   ├── tool_decorator.py      # @tool registration system
+│   └── prompt_builder.py      # Dynamic prompt generation
+├── llm/
+│   ├── __init__.py
+│   ├── groq_adapter.py        # Groq LLM implementation
+│   └── mock_adapter.py        # Mock LLM for testing
+├── tools/
+│   ├── __init__.py
+│   ├── hardware_tools.py      # Brightness, screen power
+│   ├── windows_tools.py       # Window management, virtual desktops
+│   └── system_tools.py        # File ops, processes, clipboard
+└── tests/
+```
 
-- `tools/windows_tools.py`: Window management, virtual desktops, app launching with poll-and-focus, `type_text`
-- `tools/system_tools.py`: File ops, processes, system info, clipboard
-- `tools/hardware_tools.py`: Screen brightness, monitor power control
+## Key Modules
+
+### core/protocols.py
+Defines contracts between components:
+- `LLMClient`: Abstraction for LLM providers (Groq, OpenAI, Mock)
+- `DecisionMaker`: Brain interface for tool selection
+- `ToolExecutor`: Body interface for tool execution
+- `StateManager`: Router interface
+
+### core/brain.py
+LLM Router that builds system prompts with HUD and calls LLM to get tool decisions.
+
+### core/router.py
+Atomic executor: Input -> LLM -> Tool -> Result. No loops, no retries, fail fast.
+
+### llm/groq_adapter.py & llm/mock_adapter.py
+LLM implementations. GroqAdapter uses Groq API; MockLLMAdapter uses pattern matching for testing.
 
 ## Architecture Patterns
 
@@ -69,13 +107,7 @@ Requires `GROQ_API_KEY` in `.env` file. Without it, the agent runs in mock mode 
 
 **Session-Scoped Window IDs**: Windows get integer IDs (1, 2, 3...) valid only for current session.
 
-## Known Architectural Issues
-
-See `docs/SOLID_REVIEW_AND_IMPLEMENTATION_PLAN.md` for detailed analysis. Key issues:
-- All 6 classes in single 812-line file (violates SRP)
-- No protocol/ABC definitions - tight coupling to Groq (violates DIP)
-- Hardcoded tool registry - must edit source to add tools (violates OCP)
-- Fat interfaces: `WindowManager` has 15+ methods mixing 4 domains
+**Dependency Injection**: All core components depend on protocols, not concrete implementations. LLM client is injected into Brain.
 
 ## Tool Categories
 
@@ -90,4 +122,17 @@ See `docs/SOLID_REVIEW_AND_IMPLEMENTATION_PLAN.md` for detailed analysis. Key is
 
 ## Destructive Actions
 
-Tools like `close_window`, `delete_item` require user confirmation. The `DESTRUCTIVE_ACTIONS` dict in `main_agent.py` defines which tools need confirmation and their warning messages.
+Tools like `close_window`, `delete_item` require user confirmation. The `DESTRUCTIVE_ACTIONS` dict in `core/constants.py` defines which tools need confirmation and their warning messages.
+
+## Adding New Tools
+
+1. Implement the tool function in the appropriate `tools/` module
+2. Register it in `core/registry.py` by adding to the `_registry` dict
+3. Update the tool spec in `core/brain.py` `_build_system_prompt()`
+
+Future: Use the `@tool` decorator from `core/tool_decorator.py` for auto-registration.
+
+## Legacy Files
+
+- `main_agent.py`: Original monolithic implementation (to be removed)
+- `docs/SOLID_REVIEW_AND_IMPLEMENTATION_PLAN.md`: Historical SOLID analysis
