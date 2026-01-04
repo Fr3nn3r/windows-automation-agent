@@ -205,6 +205,7 @@ class WindowManager:
 
             return {
                 "status": "success",
+                "action": "list_windows",
                 "windows": clean_list,
                 "count": len(clean_list),
                 "note": "Use these IDs (1, 2, etc.) with focus_window, minimize_window, etc."
@@ -276,18 +277,24 @@ class WindowManager:
                 if focus_result.get("status") == "success":
                     return {
                         "status": "success",
+                        "action": "launch",
+                        "target": focus_result.get("target", {"app_name": app_name}),
                         "message": f"Launched and focused: {app_name}",
                         "pid": pid
                     }
                 else:
                     return {
                         "status": "success",
+                        "action": "launch",
+                        "target": {"app_name": app_name},
                         "message": f"Launched {app_name} (focus attempt: {focus_result.get('message')})",
                         "pid": pid
                     }
             else:
                 return {
                     "status": "success",
+                    "action": "launch",
+                    "target": {"app_name": app_name},
                     "message": f"Launched {app_name}, but could not find window to focus (timed out)",
                     "pid": pid
                 }
@@ -342,13 +349,34 @@ class WindowManager:
             if foreground_thread != target_thread:
                 user32.AttachThreadInput(foreground_thread, target_thread, False)
 
-            return {"status": "success", "message": f"Focused: {target.title}"}
+            # Find the ID for this window
+            win_id = None
+            for wid, win in self._window_cache.items():
+                if win == target:
+                    win_id = wid
+                    break
+            return {
+                "status": "success",
+                "action": "focus",
+                "target": {"id": win_id, "title": target.title},
+                "message": f"Focused: {target.title}"
+            }
         except Exception as e:
             # Fallback to pyautogui method
             try:
                 pyautogui.press('alt')
                 target.activate()
-                return {"status": "success", "message": f"Focused (fallback): {target.title}"}
+                win_id = None
+                for wid, win in self._window_cache.items():
+                    if win == target:
+                        win_id = wid
+                        break
+                return {
+                    "status": "success",
+                    "action": "focus",
+                    "target": {"id": win_id, "title": target.title},
+                    "message": f"Focused (fallback): {target.title}"
+                }
             except Exception as e2:
                 return {"status": "error", "message": f"Could not focus window: {str(e)} / {str(e2)}"}
 
@@ -369,10 +397,20 @@ class WindowManager:
             return {"status": "error", "message": f"Window '{query}' not found."}
 
         try:
+            win_id = None
+            for wid, win in self._window_cache.items():
+                if win == target:
+                    win_id = wid
+                    break
             target.minimize()
-            return {"status": "success", "message": f"Minimized: {target.title}"}
+            return {
+                "status": "success",
+                "action": "minimize",
+                "target": {"id": win_id, "title": target.title},
+                "message": f"Minimized: {target.title}"
+            }
         except Exception as e:
-            return {"status": "error", "message": str(e)}
+            return {"status": "error", "action": "minimize", "message": str(e)}
 
     def maximize_window(self, window_id: Union[int, str] = None, app_name: str = None) -> Dict[str, str]:
         """
@@ -391,10 +429,20 @@ class WindowManager:
             return {"status": "error", "message": f"Window '{query}' not found."}
 
         try:
+            win_id = None
+            for wid, win in self._window_cache.items():
+                if win == target:
+                    win_id = wid
+                    break
             target.maximize()
-            return {"status": "success", "message": f"Maximized: {target.title}"}
+            return {
+                "status": "success",
+                "action": "maximize",
+                "target": {"id": win_id, "title": target.title},
+                "message": f"Maximized: {target.title}"
+            }
         except Exception as e:
-            return {"status": "error", "message": str(e)}
+            return {"status": "error", "action": "maximize", "message": str(e)}
 
     def close_window(self, window_id: Union[int, str] = None, app_name: str = None) -> Dict[str, str]:
         """
@@ -413,10 +461,21 @@ class WindowManager:
             return {"status": "error", "message": f"Window '{query}' not found."}
 
         try:
+            win_id = None
+            for wid, win in self._window_cache.items():
+                if win == target:
+                    win_id = wid
+                    break
+            title = target.title
             target.close()
-            return {"status": "success", "message": f"Closed: {target.title}"}
+            return {
+                "status": "success",
+                "action": "close",
+                "target": {"id": win_id, "title": title},
+                "message": f"Closed: {title}"
+            }
         except Exception as e:
-            return {"status": "error", "message": str(e)}
+            return {"status": "error", "action": "close", "message": str(e)}
 
     # --- TEXT INPUT ---
 
@@ -439,11 +498,21 @@ class WindowManager:
                 # Copy-Paste method (faster for long text)
                 pyperclip.copy(text)
                 pyautogui.hotkey('ctrl', 'v')
-                return {"status": "success", "message": f"Pasted text via clipboard ({len(text)} chars)"}
+                return {
+                    "status": "success",
+                    "action": "type_text",
+                    "target": {"text_length": len(text)},
+                    "message": f"Pasted text via clipboard ({len(text)} chars)"
+                }
             else:
                 # Type method (more reliable for short text)
                 pyautogui.write(text, interval=0.02)  # Small delay between keys
-                return {"status": "success", "message": f"Typed: {text[:50]}{'...' if len(text) > 50 else ''}"}
+                return {
+                    "status": "success",
+                    "action": "type_text",
+                    "target": {"text_length": len(text)},
+                    "message": f"Typed: {text[:50]}{'...' if len(text) > 50 else ''}"
+                }
         except Exception as e:
             return {"status": "error", "message": f"Failed to type text: {str(e)}"}
 
@@ -504,7 +573,13 @@ class WindowManager:
                 msg += f" matching '{filter_name}'"
             msg += " (kept Explorer visible)"
 
-            return {"status": "success", "message": msg, "count": count}
+            return {
+                "status": "success",
+                "action": "minimize_all",
+                "target": {"filter": filter_name} if filter_name else {},
+                "message": msg,
+                "count": count
+            }
         except Exception as e:
             return {"status": "error", "message": f"minimize_all failed: {str(e)}"}
 
@@ -528,9 +603,14 @@ class WindowManager:
                 except Exception:
                     pass
 
-            return {"status": "success", "message": f"Restored {count} windows.", "count": count}
+            return {
+                "status": "success",
+                "action": "restore_all",
+                "message": f"Restored {count} windows.",
+                "count": count
+            }
         except Exception as e:
-            return {"status": "error", "message": f"restore_all failed: {str(e)}"}
+            return {"status": "error", "action": "restore_all", "message": f"restore_all failed: {str(e)}"}
 
     def maximize_all(self, filter_name: str = None) -> Dict[str, Union[str, int]]:
         """
@@ -557,7 +637,13 @@ class WindowManager:
             msg = f"Maximized {count} windows"
             if filter_name:
                 msg += f" matching '{filter_name}'"
-            return {"status": "success", "message": msg, "count": count}
+            return {
+                "status": "success",
+                "action": "maximize_all",
+                "target": {"filter": filter_name} if filter_name else {},
+                "message": msg,
+                "count": count
+            }
         except Exception as e:
             return {"status": "error", "message": f"maximize_all failed: {str(e)}"}
 
@@ -571,12 +657,13 @@ class WindowManager:
             current = pyvda.VirtualDesktop.current().number
             return {
                 "status": "success",
+                "action": "list_desktops",
                 "count": count,
                 "current_index": current,
                 "note": "Indexes start at 1"
             }
         except Exception as e:
-            return {"status": "error", "message": f"Desktop API failed: {str(e)}"}
+            return {"status": "error", "action": "list_desktops", "message": f"Desktop API failed: {str(e)}"}
 
     def switch_desktop(self, index: int) -> Dict[str, str]:
         """Switches to the virtual desktop at 'index'."""
@@ -598,7 +685,12 @@ class WindowManager:
 
             # desktops list is 0-indexed, but user provides 1-indexed
             desktops[index - 1].go()
-            return {"status": "success", "message": f"Switched to Desktop {index}"}
+            return {
+                "status": "success",
+                "action": "switch_desktop",
+                "target": {"desktop_index": index},
+                "message": f"Switched to Desktop {index}"
+            }
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
@@ -644,8 +736,15 @@ class WindowManager:
             hwnd = target.getHandle()
             target_desktop = desktops[desktop_index - 1]
             pyvda.AppView(hwnd).move(target_desktop)
+            win_id = None
+            for wid, win in self._window_cache.items():
+                if win == target:
+                    win_id = wid
+                    break
             return {
                 "status": "success",
+                "action": "move_window",
+                "target": {"id": win_id, "title": target.title, "desktop_index": desktop_index},
                 "message": f"Moved '{target.title}' to Desktop {desktop_index}"
             }
         except Exception as e:

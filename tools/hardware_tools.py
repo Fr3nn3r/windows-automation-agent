@@ -36,7 +36,12 @@ class HardwareController:
                 sbc.set_brightness(level)
                 msg = f"Set brightness to {level}% on all monitors."
             
-            return {"status": "success", "message": msg, "level": level}
+            return {
+                "status": "success",
+                "action": "set_brightness",
+                "target": {"level": level},
+                "message": msg
+            }
             
         except Exception as e:
             return {"status": "error", "message": f"Failed to set brightness: {str(e)}"}
@@ -45,9 +50,13 @@ class HardwareController:
         """Returns the current brightness level(s)."""
         try:
             current = sbc.get_brightness()
-            return {"status": "success", "brightness": current}
+            return {
+                "status": "success",
+                "action": "get_brightness",
+                "brightness": current
+            }
         except Exception as e:
-            return {"status": "error", "message": f"Could not read brightness: {str(e)}"}
+            return {"status": "error", "action": "get_brightness", "message": f"Could not read brightness: {str(e)}"}
 
     def turn_screen_off(self) -> Dict[str, str]:
         """
@@ -63,9 +72,13 @@ class HardwareController:
                 SC_MONITORPOWER, 
                 MONITOR_OFF
             )
-            return {"status": "success", "message": "Monitor power-off signal sent."}
+            return {
+                "status": "success",
+                "action": "turn_screen_off",
+                "message": "Monitor power-off signal sent."
+            }
         except Exception as e:
-            return {"status": "error", "message": f"Failed to turn off screen: {str(e)}"}
+            return {"status": "error", "action": "turn_screen_off", "message": f"Failed to turn off screen: {str(e)}"}
 
     def turn_screen_on(self) -> Dict[str, str]:
         """
@@ -90,9 +103,13 @@ class HardwareController:
             time.sleep(0.05)
             mouse_event(MOUSEEVENTF_MOVE, 0, -1, 0, 0) # Move 1 unit up
             
-            return {"status": "success", "message": "Monitor wake signal sent (input simulated)."}
+            return {
+                "status": "success",
+                "action": "turn_screen_on",
+                "message": "Monitor wake signal sent (input simulated)."
+            }
         except Exception as e:
-            return {"status": "error", "message": f"Failed to wake screen: {str(e)}"}
+            return {"status": "error", "action": "turn_screen_on", "message": f"Failed to wake screen: {str(e)}"}
 
 # --- Usage Example (For your testing) ---
 if __name__ == "__main__":

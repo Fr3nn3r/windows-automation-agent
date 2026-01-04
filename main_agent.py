@@ -1,15 +1,20 @@
 """
-Windows Automation Agent with Brain/Body/Orchestrator Architecture.
+Windows Automation Agent with Atomic Router Architecture.
 
 This agent uses a Groq LLM to interpret natural language commands
 and execute them using Windows system tools.
 
 Architecture:
-- AgentContext: Holds session state (history, cwd, user info)
+- AgentContext: State-focused context with HUD (last action, focused window, cwd)
 - ToolRegistry (Body): Stateless tool executor
-- Brain: LLM decision maker
-- Orchestrator: Coordinates Brain and Body, manages state
+- Brain: LLM Router - maps intent to single tool
+- Router: Atomic executor (no loops, no retries, fail fast)
 - LocalAgent: Backward-compatible facade
+
+Design Philosophy: "Stateful Context, Atomic Action"
+- User acts as the Orchestrator
+- Agent acts as the Bionic Arm
+- Short-term memory (2 turns) for "it/that" resolution
 """
 
 import os
@@ -54,41 +59,40 @@ class ConversationTurn:
 @dataclass
 class AgentContext:
     """
-    Stateful context passed to Brain for every decision.
-    Contains all environmental information the LLM needs.
+    State-focused context for atomic execution.
+    Tracks system state (HUD) rather than conversation history.
+
+    Key design: "Stateful Context, Atomic Action"
+    - Short-term memory (2 turns) for "it/that" resolution
+    - State tracking (last action, focused window) for context-aware decisions
     """
     # --- Session State ---
     session_id: str
-    max_history: int = 10  # Last N turns to include in prompt
-    history: Deque[ConversationTurn] = field(default_factory=lambda: deque(maxlen=10))
+
+    # --- Short-term Memory (Only 2 turns for "it/that" resolution) ---
+    short_term_history: Deque[ConversationTurn] = field(default_factory=lambda: deque(maxlen=2))
 
     # --- Environment State ---
     cwd: str = field(default_factory=lambda: os.path.expanduser("~"))
     user: str = field(default_factory=getpass.getuser)
     timestamp: datetime = field(default_factory=datetime.now)
 
-    # --- Window State (refreshed per turn) ---
-    active_window: Optional[str] = None
-
-    # --- Execution Tracking ---
-    retry_count: int = 0
-    max_retries: int = 3
-    last_error: Optional[str] = None
+    # --- State Tracking (The "HUD") ---
+    last_tool_output: Optional[Dict[str, Any]] = None
+    focused_window_cache: Optional[Dict[str, Any]] = None
 
     def add_turn(self, role: str, content: str, **kwargs):
-        """Add a conversation turn. Deque auto-removes oldest entries."""
-        # Sanitize content to prevent context overflow (max 1000 chars)
+        """Add a conversation turn. Deque auto-removes oldest entries (keeps last 2)."""
         if len(content) > 1000:
             content = content[:1000] + "... [TRUNCATED]"
         turn = ConversationTurn(role=role, content=content, **kwargs)
-        self.history.append(turn)  # deque auto-removes old entries
+        self.short_term_history.append(turn)
 
     def get_history_for_prompt(self) -> List[Dict[str, str]]:
-        """Format history for LLM messages array."""
+        """Format short-term history for LLM messages array."""
         messages = []
-        for turn in self.history:
+        for turn in self.short_term_history:
             if turn.role == "tool_result":
-                # Format tool results as assistant messages
                 messages.append({
                     "role": "assistant",
                     "content": f"[Tool: {turn.tool_name}] Result: {turn.content}"
@@ -97,20 +101,75 @@ class AgentContext:
                 messages.append({"role": turn.role, "content": turn.content})
         return messages
 
+    def update_state(self, tool_result: Dict[str, Any]):
+        """
+        Update state tracking after tool execution.
+        Extracts target info for the HUD display.
+        """
+        self.last_tool_output = tool_result
+
+        # If the tool returned a target with window info, cache it
+        if "target" in tool_result:
+            target = tool_result["target"]
+            if "title" in target or "id" in target:
+                self.focused_window_cache = target
+
     def refresh_environment(self, windows_manager=None):
         """Refresh dynamic environment state."""
         self.timestamp = datetime.now()
+        # Update cwd in case change_dir was used
+        self.cwd = os.getcwd()
         if windows_manager:
             try:
                 result = windows_manager.list_open_windows()
                 windows = result.get("windows", [])
-                self.active_window = windows[0] if windows else None
+                if windows:
+                    # Parse first window: "1. Notepad" -> {"id": 1, "title": "Notepad"}
+                    first = windows[0]
+                    parts = first.split(". ", 1)
+                    if len(parts) == 2:
+                        self.focused_window_cache = {
+                            "id": int(parts[0]),
+                            "title": parts[1]
+                        }
             except Exception:
-                self.active_window = None
+                pass
+
+    def get_hud(self) -> str:
+        """
+        Generate the Heads-Up Display for the system prompt.
+        Shows current system state for context-aware decisions.
+        """
+        # Format last action
+        last_action_str = "None"
+        if self.last_tool_output:
+            action = self.last_tool_output.get("action", "unknown")
+            target = self.last_tool_output.get("target", {})
+            if isinstance(target, dict):
+                target_name = target.get("title", target.get("path", target.get("app_name", "")))
+            else:
+                target_name = str(target)
+            if target_name:
+                last_action_str = f"{action} -> {target_name}"
+            else:
+                last_action_str = action
+
+        # Format focused window
+        focused_str = "Unknown"
+        if self.focused_window_cache:
+            title = self.focused_window_cache.get("title", "Unknown")
+            win_id = self.focused_window_cache.get("id", "?")
+            focused_str = f"{title} (ID: {win_id})"
+
+        return f"""[SYSTEM STATUS]
+- Active Focus: {focused_str}
+- Last Action: {last_action_str}
+- Working Dir: {self.cwd}
+- Time: {self.timestamp.strftime('%H:%M:%S')}"""
 
     def estimate_context_tokens(self) -> int:
         """Estimate tokens used by history. Rough estimate: 1 token ≈ 4 chars."""
-        total_chars = sum(len(turn.content) for turn in self.history)
+        total_chars = sum(len(turn.content) for turn in self.short_term_history)
         return total_chars // 4
 
     def get_context_usage(self, system_prompt_tokens: int = 1500) -> tuple:
@@ -163,6 +222,7 @@ class ToolRegistry:
             # --- Hardware ---
             "set_brightness": self.hardware.set_brightness,
             "turn_screen_off": self.hardware.turn_screen_off,
+            "turn_screen_on": self.hardware.turn_screen_on,
 
             # --- Windows ---
             "list_windows": self.windows.list_open_windows,
@@ -184,6 +244,9 @@ class ToolRegistry:
             "get_sys_info": self.system.get_system_info,
             "check_processes": self.system.list_processes,
             "delete_item": self.system.delete_item,
+            "get_env": self.system.get_environment_variable,
+            "list_usb": self.system.list_usb_devices,
+            "change_dir": self.system.change_directory,
 
             # --- App Launcher (with auto-focus) & Clipboard ---
             "launch_app": self.windows.launch_app,  # Uses poll-and-focus
@@ -222,74 +285,50 @@ class Brain:
         self.model = model or (self.MODEL_SMART if use_smart_model else self.MODEL_FAST)
 
     def _build_system_prompt(self, context: AgentContext) -> str:
-        """Build system prompt with context awareness."""
+        """Build system prompt with HUD for atomic execution."""
         tools_spec = """
 Tools and their EXACT argument names:
-- set_brightness: args: {"level": <int 0-100>}
+- set_brightness: args: {"level": <int 0-100|}
 - turn_screen_off: args: {}
+- turn_screen_on: args: {}
 - list_windows: args: {} -> Returns numbered list like "1. Notepad", "2. Chrome". Use IDs for other commands.
-- focus_window: args: {"window_id": <int or string>} - PREFER using ID from list_windows
-- minimize_window: args: {"window_id": <int or string>}
-- maximize_window: args: {"window_id": <int or string>}
-- minimize_all: args: {"filter_name": "<optional>"} - Safely minimizes apps (keeps Explorer visible)
-- restore_all: args: {} - The "Undo" button. Restores all minimized windows.
-- close_window: args: {"window_id": <int or string>} [DESTRUCTIVE - requires confirmation]
-- list_desktops: args: {} - returns current desktop index and total count
-- switch_desktop: args: {"index": <int>} - desktop indexes start at 1
-- move_window: args: {"window_id": <int or string>, "desktop_index": <int>}
-- list_files: args: {"path": "<directory path>"}
+- focus_window: args: {"window_id": <int or string|}
+- minimize_window: args: {"window_id": <int or string|}
+- maximize_window: args: {"window_id": <int or string|}
+- minimize_all: args: {"filter_name": "<optional>"|}
+- restore_all: args: {}
+- close_window: args: {"window_id": <int or string|}  [DESTRUCTIVE]
+- list_desktops: args: {}
+- switch_desktop: args: {"index": <int|}
+- move_window: args: {"window_id": <int or string>, "desktop_index": <int|}
+- list_files: args: {"path": "<directory path>|}
 - get_sys_info: args: {}
-- check_processes: args: {"filter_name": "<optional process name>"} or {}
-- delete_item: args: {"path": "<file/folder path>", "confirm": true} [DESTRUCTIVE - requires confirmation]
-- launch_app: args: {"app_name": "<app name like 'notepad', 'chrome', 'calc'>"}
-- open_explorer: args: {"path": "<folder path>"}
+- check_processes: args: {"filter_name": "<optional>"|} or {}
+- delete_item: args: {"path": "<path>", "confirm": true|}  [DESTRUCTIVE]
+- launch_app: args: {"app_name": "<app name like 'notepad', 'chrome'>|}
+- open_explorer: args: {"path": "<folder path>|}
 - get_clipboard: args: {}
-- set_clipboard: args: {"text": "<text to copy>"}
-- type_text: args: {"text": "<text to type>"} - Types/pastes text into focused window
-
-WINDOW ID STRATEGY:
-- list_windows returns IDs like "1. Notepad", "2. Chrome - YouTube"
-- Use these IDs (1, 2, etc.) for focus_window, minimize_window, close_window, move_window
-- IDs are STABLE even if the window title changes (e.g., Notepad -> *Untitled)
-- For "minimize all X", use minimize_all with filter_name, NOT multiple minimize_window calls
-
-IMPORTANT:
-- When user says "current desktop", first call list_desktops to get the current_index.
-- All argument values must be the correct type: integers for index/level, strings for names/paths.
-- For paths, you can use ~ to refer to the user's home directory.
+- set_clipboard: args: {"text": "<text>|}
+- type_text: args: {"text": "<text>"|}
+- get_env: args: {"var_name": "<env var name like 'PATH'>|}
+- list_usb: args: {}
+- change_dir: args: {"path": "<directory path>|}
 """
 
-        context_info = f"""
-Current Context:
-- Working Directory: {context.cwd}
-- User: {context.user}
-- Time: {context.timestamp.strftime('%Y-%m-%d %H:%M:%S')}
-- Active Window: {context.active_window or 'Unknown'}
-"""
-
-        error_context = ""
-        if context.last_error and context.retry_count > 0:
-            error_context = f"""
-Previous Error (Retry {context.retry_count}/{context.max_retries}):
-{context.last_error}
-Please try a different approach or correct the error.
-"""
+        # Get HUD from context
+        hud = context.get_hud()
 
         return (
-            "You are a Windows Automation Agent.\n"
+            "You are a Windows Automation Router.\n"
             f"{tools_spec}\n"
-            f"{context_info}\n"
-            f"{error_context}"
-            "OUTPUT FORMAT:\n"
-            "Return a SINGLE JSON object OR a LIST for multi-step tasks.\n"
-            "Single: {\"tool\": \"tool_name\", \"args\": {...}}\n"
-            "Multi:  [{\"tool\": \"launch_app\", \"args\": {...}}, {\"tool\": \"type_text\", \"args\": {...}}]\n\n"
-            "CRITICAL RULES:\n"
-            "1. If user asks to 'Open X and type Y', return a LIST with launch_app THEN type_text.\n"
-            "2. Actions in history starting with 'Executed:' are ALREADY DONE. Do NOT repeat them.\n"
-            "3. Only output NEW actions needed for the current request.\n"
-            "4. If user says 'do the same' or 'again', repeat only the relevant actions, not the entire history.\n"
-            "5. If impossible, output: {\"tool\": \"error\", \"args\": {\"message\": \"reason\"}}"
+            f"{hud}\n\n"
+            "OUTPUT RULES:\n"
+            "1. Return EXACTLY ONE JSON object: {\"tool\": \"...\", \"args\": {...}}\n"
+            "2. Do NOT return a list of actions.\n"
+            "3. Do NOT chain actions. If user asks for two things, pick the FIRST one.\n"
+            "4. Use 'Last Action' to resolve references like 'close it', 'type here', 'that window'.\n"
+            "5. Use 'Active Focus' to know which window will receive type_text.\n"
+            "6. If impossible, output: {\"tool\": \"error\", \"args\": {\"message\": \"reason\"}}\n"
         )
 
     def decide(self, context: AgentContext, user_input: str) -> Dict[str, Any]:
@@ -331,29 +370,55 @@ Please try a different approach or correct the error.
         """Mock decision logic for testing without API key."""
         user_lower = user_input.lower()
 
+        # Screen commands
+        if "screen" in user_lower:
+            if "off" in user_lower or "turn off" in user_lower:
+                return {"tool": "turn_screen_off", "args": {}}
+            if "on" in user_lower or "wake" in user_lower:
+                return {"tool": "turn_screen_on", "args": {}}
+
         # Brightness commands
         if "brightness" in user_lower:
             nums = re.findall(r'\d+', user_input)
             level = int(nums[0]) if nums else 50
             return {"tool": "set_brightness", "args": {"level": level}}
 
-        # Multi-step commands: "Open X and type Y" or "Open X and paste Y"
+        # USB devices
+        if "usb" in user_lower and ("list" in user_lower or "show" in user_lower or "device" in user_lower):
+            return {"tool": "list_usb", "args": {}}
+
+        # Environment variables
+        if "env" in user_lower or "path" in user_lower.split():
+            if "path" in user_lower:
+                return {"tool": "get_env", "args": {"var_name": "PATH"}}
+            match = re.search(r"['\"]([^'\"]+)['\"]", user_input)
+            if match:
+                return {"tool": "get_env", "args": {"var_name": match.group(1)}}
+            return {"tool": "get_env", "args": {"var_name": "PATH"}}
+
+        # Change directory
+        if "cd " in user_lower or "change dir" in user_lower or "navigate to" in user_lower:
+            if "download" in user_lower:
+                return {"tool": "change_dir", "args": {"path": "~/Downloads"}}
+            if "desktop" in user_lower:
+                return {"tool": "change_dir", "args": {"path": "~/Desktop"}}
+            if "home" in user_lower:
+                return {"tool": "change_dir", "args": {"path": "~"}}
+            # Try to extract path
+            match = re.search(r"['\"]([^'\"]+)['\"]", user_input)
+            if match:
+                return {"tool": "change_dir", "args": {"path": match.group(1)}}
+            return {"tool": "change_dir", "args": {"path": "~"}}
+
+        # Multi-step commands: "Open X and type Y" - ATOMIC: pick first action only
         if ("open" in user_lower or "launch" in user_lower) and ("type" in user_lower or "paste" in user_lower):
             app = "notepad"  # Default
             for a in ["notepad", "chrome", "code"]:
                 if a in user_lower:
                     app = a
                     break
-
-            # Extract text to type (in quotes or after 'type'/'paste')
-            match = re.search(r"['\"]([^'\"]+)['\"]", user_input)
-            text = match.group(1) if match else "Hello World"
-
-            # Return LIST of actions
-            return [
-                {"tool": "launch_app", "args": {"app_name": app}},
-                {"tool": "type_text", "args": {"text": text}}
-            ]
+            # Atomic: only launch the app, user will issue type command next
+            return {"tool": "launch_app", "args": {"app_name": app}}
 
         # Launch app commands (single action)
         if "open" in user_lower or "launch" in user_lower or "start" in user_lower:
@@ -442,17 +507,17 @@ Please try a different approach or correct the error.
 
 
 # =============================================================================
-# ORCHESTRATOR (THE STATE MANAGER)
+# ROUTER (ATOMIC EXECUTOR)
 # =============================================================================
 
-class Orchestrator:
+class Router:
     """
-    The State Manager - coordinates Brain (decisions) and Body (tools).
-    Handles:
-    - Session lifecycle
-    - Conversation history
-    - Error recovery loop
-    - Destructive action interception
+    Atomic Executor - maps Intent -> Tool -> Result.
+    No loops. No retries. Fail fast.
+
+    Design philosophy: "Stateful Context, Atomic Action"
+    - User acts as the "Orchestrator"
+    - Agent acts as the "Bionic Arm"
     """
 
     def __init__(self, brain: Brain, body: ToolRegistry):
@@ -516,24 +581,48 @@ class Orchestrator:
         return result
 
     # Tools that need latency injection (wait for UI to appear)
-    # Note: launch_app now has built-in poll-and-focus, no external delay needed
     LATENCY_TOOLS = {
         "open_explorer": 1.0,   # Wait 1s for Explorer window
         "focus_window": 0.3,    # Brief wait for focus change
     }
 
-    def _execute_single_action(self, decision: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a single tool action. Used for multi-action sequences."""
+    def process(self, user_input: str) -> Dict[str, Any]:
+        """
+        Atomic Execution: Input -> LLM -> Tool -> Result.
+        No loops. No retries. Fail fast.
+        """
+        if not self.context:
+            self.start_session()
+
+        # 1. Refresh Context (Only what's needed for THIS decision)
+        self.context.refresh_environment(self.body.windows)
+        self.context.add_turn("user", user_input)
+
+        # 2. DECIDE (Router/Brain) - Single pass
+        decision = self.brain.decide(self.context, user_input)
+
+        # 3. VALIDATE - Handle list by taking first action only
+        if isinstance(decision, list):
+            if not decision:
+                return {"status": "error", "message": "Empty action list"}
+            # Atomic: take first action only, warn if more
+            if len(decision) > 1:
+                print(f"[ATOMIC] LLM returned {len(decision)} actions, executing first only.")
+            decision = decision[0]
+
         tool_name = decision.get("tool")
         args = decision.get("args", {})
 
+        # Handle error from Brain
         if tool_name == "error":
-            return {"status": "error", "message": args.get("message", "Unknown error")}
+            error_msg = args.get("message", "Unknown error")
+            return {"status": "error", "message": error_msg}
 
-        # Confirm if destructive
+        # 4. CONFIRM (if destructive)
         if not self._confirm_destructive_action(tool_name, args):
             return {"status": "cancelled", "message": f"User cancelled {tool_name}"}
 
+        # 5. ACT (Body) - No retry, fail fast
         func = self.body.get(tool_name)
         if not func:
             return {"status": "error", "message": f"Tool '{tool_name}' not found"}
@@ -541,132 +630,30 @@ class Orchestrator:
         try:
             result = func(**args)
             result = self._sanitize_output(result)
-            print(f"  -> {tool_name}: {result.get('message', result.get('status'))}")
+
+            # 6. UPDATE STATE (for HUD)
+            self.context.update_state(result)
 
             # Latency injection: wait for UI after certain tools
             if tool_name in self.LATENCY_TOOLS and result.get("status") == "success":
                 delay = self.LATENCY_TOOLS[tool_name]
-                print(f"  [WAIT] Waiting {delay}s for UI...")
                 time.sleep(delay)
 
+            # Record in short-term history
+            self.context.add_turn(
+                "tool_result",
+                str(result),
+                tool_name=tool_name,
+                tool_args=args,
+                tool_result=result
+            )
+
             return result
+
+        except TypeError as e:
+            return {"status": "error", "message": f"Argument mismatch for {tool_name}: {e}"}
         except Exception as e:
             return {"status": "error", "message": f"{tool_name} failed: {e}"}
-
-    def process(self, user_input: str) -> Dict[str, Any]:
-        """
-        Main execution pipeline with error recovery loop.
-        Input -> Decide -> [Confirm] -> Act -> Feedback -> [Retry if error]
-        """
-        if not self.context:
-            self.start_session()
-
-        # Record user input
-        self.context.add_turn("user", user_input)
-        self.context.refresh_environment(self.body.windows)
-        self.context.retry_count = 0
-        self.context.last_error = None
-
-        while self.context.retry_count <= self.context.max_retries:
-            # 1. DECIDE (Brain)
-            decision = self.brain.decide(self.context, user_input)
-
-            # Handle LLM returning a list of actions - execute all sequentially
-            if isinstance(decision, list):
-                if not decision:
-                    return {"status": "error", "message": "Empty action list"}
-                results = []
-                action_summaries = []
-                for action in decision:
-                    result = self._execute_single_action(action)
-                    results.append(result)
-                    # Build summary of what was done
-                    tool = action.get("tool", "unknown")
-                    args = action.get("args", {})
-                    action_summaries.append(f"{tool}({', '.join(f'{k}={v}' for k, v in args.items())})")
-                    if result.get("status") == "cancelled":
-                        break  # Stop if user cancels
-
-                # Record what was done in history (so LLM knows not to repeat)
-                summary = "Executed: " + " -> ".join(action_summaries)
-                self.context.add_turn("assistant", summary)
-
-                return {"status": "success", "message": f"Executed {len(results)} actions", "results": results}
-
-            tool_name = decision.get("tool")
-            args = decision.get("args", {})
-
-            # Handle error/unknown from Brain
-            if tool_name == "error":
-                error_msg = args.get("message", "Unknown error")
-                self.context.add_turn("assistant", f"Error: {error_msg}")
-                return {"status": "error", "message": error_msg}
-
-            # 2. CONFIRM (if destructive)
-            if not self._confirm_destructive_action(tool_name, args):
-                self.context.add_turn("assistant", f"Action cancelled by user: {tool_name}")
-                return {"status": "cancelled", "message": f"User cancelled {tool_name}"}
-
-            # 3. ACT (Body)
-            func = self.body.get(tool_name)
-
-            if not func:
-                error_msg = f"Tool '{tool_name}' not found"
-                self.context.add_turn("assistant", f"Error: {error_msg}")
-                return {"status": "error", "message": error_msg}
-
-            try:
-                result = func(**args)
-                result = self._sanitize_output(result)
-
-                # 4. CHECK SUCCESS
-                if result.get("status") == "success":
-                    # Record success and return
-                    self.context.add_turn(
-                        "tool_result",
-                        str(result),
-                        tool_name=tool_name,
-                        tool_args=args,
-                        tool_result=result
-                    )
-                    return result
-
-                # Tool returned error status - attempt recovery
-                self.context.last_error = result.get("message", "Tool returned error")
-                self.context.retry_count += 1
-
-                if self.context.retry_count <= self.context.max_retries:
-                    # Feed error back to Brain for retry
-                    error_context = f"Previous attempt failed: {self.context.last_error}"
-                    self.context.add_turn("tool_result", error_context, tool_name=tool_name)
-                    print(f"[RETRY {self.context.retry_count}/{self.context.max_retries}] {error_context}")
-                    continue
-                else:
-                    return result
-
-            except TypeError as e:
-                error_msg = f"Argument mismatch for {tool_name}: {e}"
-                self.context.last_error = error_msg
-                self.context.retry_count += 1
-
-                if self.context.retry_count <= self.context.max_retries:
-                    self.context.add_turn("tool_result", error_msg, tool_name=tool_name)
-                    print(f"[RETRY {self.context.retry_count}/{self.context.max_retries}] {error_msg}")
-                    continue
-                else:
-                    return {"status": "error", "message": error_msg}
-
-            except Exception as e:
-                error_msg = f"Execution failed: {e}"
-                self.context.last_error = error_msg
-                self.context.add_turn("assistant", f"Error: {error_msg}")
-                return {"status": "error", "message": error_msg}
-
-        # Max retries exceeded
-        return {
-            "status": "error",
-            "message": f"Failed after {self.context.max_retries} retries: {self.context.last_error}"
-        }
 
 
 # =============================================================================
@@ -675,7 +662,7 @@ class Orchestrator:
 
 class LocalAgent:
     """
-    Backward-compatible facade that wraps the new architecture.
+    Backward-compatible facade that wraps the Router architecture.
     Provides the same interface as the original LocalAgent.
 
     Args:
@@ -694,8 +681,8 @@ class LocalAgent:
 
         self.body = ToolRegistry()
         self.brain = Brain(client, use_smart_model=use_smart_model)
-        self.orchestrator = Orchestrator(self.brain, self.body)
-        self.orchestrator.start_session()
+        self.router = Router(self.brain, self.body)
+        self.router.start_session()
 
         # Expose for backward compatibility
         self.tool_registry = self.body._registry
@@ -705,21 +692,19 @@ class LocalAgent:
 
     def execute(self, user_input: str) -> Optional[Dict[str, Any]]:
         """
-        Main execution method - same signature as before.
+        Atomic execution: Input -> Tool -> Result.
+        No loops, no retries. Fail fast.
         """
         print(f"\nUser: '{user_input}'")
 
-        result = self.orchestrator.process(user_input)
+        result = self.router.process(user_input)
 
-        status_icon = "[OK]" if result.get("status") == "success" else "[WARN]"
+        status_icon = "[OK]" if result.get("status") == "success" else "[ERR]"
         print(f"{status_icon} Result: {result}")
 
-        # Show context usage
-        used, max_tok, pct = self.orchestrator.context.get_context_usage()
-        bar_len = 20
-        filled = int(bar_len * pct / 100)
-        bar = "#" * filled + "-" * (bar_len - filled)
-        print(f"[CTX] [{bar}] {pct}% ({used}/{max_tok} tokens)")
+        # Show HUD state
+        if self.router.context:
+            print(self.router.context.get_hud())
 
         return result
 
@@ -738,15 +723,19 @@ TEST_COMMANDS = [
     "Open Notepad",
     "Open Downloads folder",
     "Launch Calculator",
-    # Multi-step commands (LLM should return list of actions)
-    "Open Notepad and type 'Hello World'",
-    "Open Notepad and paste 'coucou owl'",
+    # New tools
+    "Wake up the screen",
+    "Show USB devices",
+    "Show PATH variable",
+    "Change directory to Downloads",
     # Batch operations (smart tools)
     "Minimize all Chrome windows",
     "Minimize all windows",
     # Clipboard
     "Get clipboard content",
     "Copy 'test message' to clipboard",
+    # Type (after opening app)
+    "Type 'Hello World'",
 ]
 
 
@@ -788,9 +777,9 @@ if __name__ == "__main__":
 
     agent = LocalAgent(use_smart_model=use_smart)
 
-    print("[AGENT] Windows Automation Agent Initialized.")
-    print(f"[AGENT] Session: {agent.orchestrator.context.session_id}")
-    print(f"[AGENT] Working Directory: {agent.orchestrator.context.cwd}")
+    print("[AGENT] Windows Automation Agent Initialized (Atomic Mode).")
+    print(f"[AGENT] Session: {agent.router.context.session_id}")
+    print(f"[AGENT] Working Directory: {agent.router.context.cwd}")
     print("Tip: Use UP/DOWN arrows to cycle through commands. '--smart' for 70B model.")
     show_menu()  # Show menu once at start
 

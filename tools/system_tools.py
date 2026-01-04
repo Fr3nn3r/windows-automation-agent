@@ -43,7 +43,13 @@ class SystemTools:
             if len(items) > 50:
                 annotated.append(f"... (+{len(items)-50} more)")
                 
-            return {"status": "success", "path": target_path, "items": annotated}
+            return {
+                "status": "success",
+                "action": "list_directory",
+                "target": {"path": target_path},
+                "path": target_path,
+                "items": annotated
+            }
         except PermissionError:
             return {"status": "error", "message": "Access Denied"}
         except Exception as e:
@@ -55,7 +61,12 @@ class SystemTools:
             target_path = os.path.expanduser(path)
             with open(target_path, 'w', encoding='utf-8') as f:
                 f.write(content)
-            return {"status": "success", "message": f"File created at {target_path}"}
+            return {
+                "status": "success",
+                "action": "create_file",
+                "target": {"path": target_path},
+                "message": f"File created at {target_path}"
+            }
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
@@ -82,9 +93,14 @@ class SystemTools:
             elif os.path.isdir(target_path):
                 shutil.rmtree(target_path)
             else:
-                return {"status": "error", "message": "Path not found."}
-                
-            return {"status": "success", "message": f"Deleted: {target_path}"}
+                return {"status": "error", "action": "delete_item", "message": "Path not found."}
+
+            return {
+                "status": "success",
+                "action": "delete_item",
+                "target": {"path": target_path},
+                "message": f"Deleted: {target_path}"
+            }
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
@@ -100,24 +116,38 @@ class SystemTools:
                 "cpu_usage": f"{psutil.cpu_percent()}%",
                 "memory_usage": f"{psutil.virtual_memory().percent}%"
             }
-            return {"status": "success", "data": info}
+            return {
+                "status": "success",
+                "action": "get_system_info",
+                "data": info
+            }
         except Exception as e:
-            return {"status": "error", "message": str(e)}
+            return {"status": "error", "action": "get_system_info", "message": str(e)}
 
     def get_environment_variable(self, var_name: str) -> Dict[str, Union[str, List[str]]]:
         """Gets a specific env var. If 'PATH', returns a list."""
         try:
             val = os.environ.get(var_name)
             if not val:
-                return {"status": "error", "message": "Variable not found"}
-            
+                return {"status": "error", "action": "get_env", "message": "Variable not found"}
+
             # Special handling for PATH to make it readable
             if var_name.upper() == "PATH":
-                return {"status": "success", "value": val.split(os.pathsep)}
-            
-            return {"status": "success", "value": val}
+                return {
+                    "status": "success",
+                    "action": "get_env",
+                    "target": {"var_name": var_name},
+                    "value": val.split(os.pathsep)
+                }
+
+            return {
+                "status": "success",
+                "action": "get_env",
+                "target": {"var_name": var_name},
+                "value": val
+            }
         except Exception as e:
-            return {"status": "error", "message": str(e)}
+            return {"status": "error", "action": "get_env", "message": str(e)}
 
     def list_processes(self, filter_name: str = None) -> Dict[str, List[dict]]:
         """
@@ -137,9 +167,15 @@ class SystemTools:
             
             # Limit results if no filter to avoid flooding
             if not filter_name:
-                matches = matches[:20] 
-                
-            return {"status": "success", "count": len(matches), "processes": matches}
+                matches = matches[:20]
+
+            return {
+                "status": "success",
+                "action": "list_processes",
+                "target": {"filter": filter_name} if filter_name else {},
+                "count": len(matches),
+                "processes": matches
+            }
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
@@ -162,9 +198,65 @@ class SystemTools:
             # Filter out duplicates (common in WMI)
             unique_devices = list(set(device_list))
 
-            return {"status": "success", "devices": unique_devices}
+            return {
+                "status": "success",
+                "action": "list_usb",
+                "count": len(unique_devices),
+                "devices": unique_devices
+            }
         except Exception as e:
-            return {"status": "error", "message": str(e)}
+            return {"status": "error", "action": "list_usb", "message": str(e)}
+
+    # --- DIRECTORY NAVIGATION ---
+
+    def change_directory(self, path: str) -> Dict[str, str]:
+        """
+        Changes the agent's working directory.
+        Returns the new absolute path for context update.
+
+        Args:
+            path: Target directory (supports ~ for home, relative paths)
+        """
+        try:
+            target_path = os.path.expanduser(path)
+
+            # Resolve relative paths
+            if not os.path.isabs(target_path):
+                target_path = os.path.abspath(target_path)
+
+            if not os.path.exists(target_path):
+                return {
+                    "status": "error",
+                    "action": "change_directory",
+                    "message": f"Path does not exist: {target_path}"
+                }
+
+            if not os.path.isdir(target_path):
+                return {
+                    "status": "error",
+                    "action": "change_directory",
+                    "message": f"Not a directory: {target_path}"
+                }
+
+            os.chdir(target_path)
+            return {
+                "status": "success",
+                "action": "change_directory",
+                "target": {"path": target_path},
+                "message": f"Changed to: {target_path}"
+            }
+        except PermissionError:
+            return {
+                "status": "error",
+                "action": "change_directory",
+                "message": f"Access denied: {path}"
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "action": "change_directory",
+                "message": str(e)
+            }
 
     # --- APP LAUNCHER ---
 
@@ -208,11 +300,13 @@ class SystemTools:
 
             return {
                 "status": "success",
+                "action": "launch_app",
+                "target": {"app_name": app_name},
                 "message": f"Launched: {app_name}",
                 "pid": process.pid
             }
         except Exception as e:
-            return {"status": "error", "message": f"Failed to launch {app_name}: {e}"}
+            return {"status": "error", "action": "launch_app", "message": f"Failed to launch {app_name}: {e}"}
 
     def open_explorer(self, path: str = ".") -> Dict[str, str]:
         """
@@ -239,10 +333,12 @@ class SystemTools:
 
             return {
                 "status": "success",
+                "action": "open_explorer",
+                "target": {"path": target_path},
                 "message": f"Opened Explorer at: {target_path}"
             }
         except Exception as e:
-            return {"status": "error", "message": f"Failed to open Explorer: {e}"}
+            return {"status": "error", "action": "open_explorer", "message": f"Failed to open Explorer: {e}"}
 
     # --- CLIPBOARD ---
 
@@ -263,11 +359,12 @@ class SystemTools:
 
             return {
                 "status": "success",
+                "action": "get_clipboard",
                 "content": content,
                 "length": original_length
             }
         except Exception as e:
-            return {"status": "error", "message": f"Failed to read clipboard: {e}"}
+            return {"status": "error", "action": "get_clipboard", "message": f"Failed to read clipboard: {e}"}
 
     def set_clipboard(self, text: str) -> Dict[str, str]:
         """
@@ -284,10 +381,12 @@ class SystemTools:
 
             return {
                 "status": "success",
+                "action": "set_clipboard",
+                "target": {"text_length": len(text)},
                 "message": f"Copied {len(text)} characters to clipboard"
             }
         except Exception as e:
-            return {"status": "error", "message": f"Failed to set clipboard: {e}"}
+            return {"status": "error", "action": "set_clipboard", "message": f"Failed to set clipboard: {e}"}
 
 # --- Usage Example ---
 if __name__ == "__main__":
