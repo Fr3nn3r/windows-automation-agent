@@ -346,7 +346,7 @@ Tools and their EXACT argument names:
             messages.extend(context.get_history_for_prompt())
 
             # Add current request if not already the last message
-            if not context.history or context.history[-1].content != user_input:
+            if not context.short_term_history or context.short_term_history[-1].content != user_input:
                 messages.append({"role": "user", "content": user_input})
 
             start = time.time()
