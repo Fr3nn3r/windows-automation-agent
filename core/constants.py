@@ -28,8 +28,8 @@ LATENCY_TOOLS: Dict[str, float] = {
 # =============================================================================
 
 # Groq model identifiers
-MODEL_FAST = "llama-3.1-8b-instant"      # The Intern - fast but limited
-MODEL_SMART = "llama-3.1-70b-versatile"  # The Senior - slower but smarter
+MODEL_FAST = "llama-3.3-70b-versatile"   # Fast model (8B deprecated)
+MODEL_SMART = "llama-3.3-70b-versatile"  # Smart model
 
 # Context limits
 MAX_CONTEXT_TOKENS = 8192  # Groq Llama models context window
